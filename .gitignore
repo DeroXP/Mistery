@@ -1,0 +1,14 @@
+﻿__pycache__/
+*.pyc
+build/
+dist/
+*.spec.bak
+.venv/
+venv/
+# Never: the update signing key, and anything that looks like one
+*.key
+*.pem
+signing/
+# Local build output
+packaging/out/
+packaging/tools-cache/
