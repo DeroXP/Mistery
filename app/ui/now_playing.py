@@ -18,16 +18,16 @@ import time
 from html import escape as html_escape
 
 from PySide6.QtCore import (
-    QEasingCurve, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation,
-    Signal,
+    QAbstractAnimation, QEasingCurve, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
+    QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QCursor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
-    QPixmap,
+    QColor, QCursor, QFont, QFontMetrics, QImage, QKeySequence, QLinearGradient, QPainter,
+    QPainterPath, QPen, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QButtonGroup, QGridLayout, QHBoxLayout, QLabel, QMenu, QPushButton,
-    QScrollArea, QSizePolicy, QSlider, QStackedWidget, QToolTip, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QStackedWidget, QToolTip, QVBoxLayout, QWidget,
 )
 
 from ..config import settings
@@ -36,19 +36,15 @@ from ..music import audio_fx, library, loudness
 from ..music.tags import quality_label
 from ..util import fmt_clock, fmt_size, reveal_in_explorer
 from .player_overlay import SeekBar
+from .screensaver import LYRIC_WHITE, ScreensaverView
 from .sound_panel import SoundPanel
 from .theme import C
 from .vinyl import VinylView
 from .widgets.artview import ArtView
 from .widgets.icons import IconButton, icon_pixmap, paint_icon
 from .widgets.tracklist import TrackList
+from .widgets.volume_bar import VolumeBar
 
-_VOLUME_STYLE = f"""
-    QSlider::groove:horizontal {{ height: 4px; border-radius: 2px; background: rgba(255,255,255,0.22); }}
-    QSlider::sub-page:horizontal {{ background: {C.TEXT}; border-radius: 2px; }}
-    QSlider::handle:horizontal {{ background: {C.TEXT}; width: 12px; height: 12px;
-                                  margin: -4px 0; border-radius: 6px; }}
-"""
 
 # Small capitals over a title: "PLAYING FROM ALBUM", "NEXT UP", the Details sections.
 _CAPTION_STYLE = "color: rgba(255,255,255,0.62); font-size: 7.5pt; font-weight: 700;"
@@ -239,51 +235,54 @@ def _sync_transport(buttons: dict, player) -> None:
         buttons[key].blockSignals(False)
 
 
-def _volume_row(player, width: int = 110) -> tuple[QHBoxLayout, IconButton, QSlider]:
+def _volume_row(player, width: int = 110) -> tuple[QHBoxLayout, IconButton, VolumeBar]:
+    """The level and the mute, for the bar and for Now Playing alike.
+
+    The painted VolumeBar replaced a QSlider whose click was a 10-unit page
+    step. Mute is now a state of its own (mpv's own property, kept in
+    music_muted) instead of "set the level to 0 and remember it in this widget",
+    which forgot where the bar was as soon as the app closed.
+    """
     row = QHBoxLayout()
     row.setSpacing(8)
-    icon = IconButton("volume", size=34, icon_size=18, tooltip="Mute")
-    slider = QSlider(Qt.Orientation.Horizontal)
-    slider.setRange(0, 100)
-    slider.setValue(player.volume)
-    slider.setFixedWidth(width)
-    slider.setStyleSheet(_VOLUME_STYLE)
-    remembered = {"level": player.volume or 70}
+    icon = IconButton("volume", size=34, icon_size=18, tooltip="Mute  (Ctrl+M)")
+    bar = VolumeBar(0, 100)
+    bar.setFixedWidth(width)
+    bar.set_value(player.volume)
+    bar.set_muted(player.muted)
 
-    def show_level(value: int) -> None:
-        icon.set_icon_name("mute" if value == 0 else ("volume_low" if value < 50 else "volume"))
+    def show_level(value: int, muted: bool) -> None:
+        icon.set_icon_name("mute" if muted or value == 0
+                           else ("volume_low" if value < 50 else "volume"))
 
     def changed(value: int) -> None:
         player.set_volume(value)
-        show_level(value)
+        # Moving the bar is never a way of asking to stay silent.
+        if player.muted:
+            player.set_muted(False)
+        show_level(value, player.muted)
 
     def follow(value: int) -> None:
-        # Set from the other row (the bar and Now Playing each have one). Signals
-        # blocked: this is a display of the level, not a new choice of it.
-        if slider.value() != value:
-            if value == 0:
-                # Muted over there: unmuting here goes back to the same level,
-                # not to whatever this row last remembered.
-                remembered["level"] = slider.value()
-            slider.blockSignals(True)
-            slider.setValue(value)
-            slider.blockSignals(False)
-        show_level(value)
+        # Set from the other row (the bar and Now Playing each have one). The
+        # widget never emits from set_value, so this is a display of the level
+        # rather than a new choice of it, and the two cannot ping-pong.
+        bar.set_value(value)
+        show_level(value, player.muted)
 
-    def toggle_mute() -> None:
-        if slider.value() > 0:
-            remembered["level"] = slider.value()
-            slider.setValue(0)
-        else:
-            slider.setValue(remembered["level"] or 70)
+    def follow_mute(muted: bool) -> None:
+        bar.set_muted(muted)
+        show_level(bar.value(), muted)
 
-    slider.valueChanged.connect(changed)
-    icon.clicked.connect(toggle_mute)
+    bar.value_changed.connect(changed)
+    icon.clicked.connect(lambda: player.set_muted(not player.muted))
     player.volume_changed.connect(follow)
-    changed(slider.value())
+    player.muted_changed.connect(follow_mute)
+    # Nothing is set at construction: two rows are built at every launch, and
+    # calling set_volume here rewrote settings.json twice before a note played.
+    show_level(player.volume, player.muted)
     row.addWidget(icon)
-    row.addWidget(slider)
-    return row, icon, slider
+    row.addWidget(bar)
+    return row, icon, bar
 
 
 def _sound_button(player, owner: QWidget) -> IconButton:
@@ -516,6 +515,7 @@ _CONTEXT_CAPTIONS = {
     "liked": "PLAYING FROM YOUR LIBRARY",
     "songs": "PLAYING FROM YOUR LIBRARY",
     "search": "PLAYING FROM SEARCH",
+    "playlist": "PLAYING FROM PLAYLIST",
     "queue": "PLAYING FROM",
 }
 
@@ -736,6 +736,11 @@ class _Row:
 
 _DOT_KINDS = ("intro", "gap", "break")
 
+# The screensaver's lyrics, by distance from the sung line. The top of it is
+# LYRIC_WHITE rather than #FFFFFF: pure white is the worst case for an OLED's
+# blue subpixel, and at this size nobody can tell the difference.
+_SAVER_ALPHA = (int(255 * LYRIC_WHITE), 86, 38)
+
 
 class LyricsView(QWidget):
     """Synced lyrics that follow the song. Click a line to jump to it.
@@ -749,6 +754,11 @@ class LyricsView(QWidget):
     """
 
     seek_requested = Signal(float)
+    # main_window fetches the words once and hands them to this view. The
+    # screensaver's second copy hears about them here rather than through
+    # another call site that could be missed.
+    lyrics_changed = Signal(object)
+    status_changed = Signal(str)
 
     _GAP = 18
     _FOCUS = 0.32          # the sung line sits about a third of the way down
@@ -775,6 +785,10 @@ class LyricsView(QWidget):
         self._playing = False
         self._position = 0.0
         self._position_at = time.monotonic()
+        self._screensaver = False   # the sung line and its neighbours, nothing else
+        self._driven = False        # somebody else is calling tick()
+        self._focus = self._FOCUS
+        self._dim = 1.0
         self._dots_since = 0.0                          # when the current dots row arrived
         self._leaving: tuple[int, float] | None = None  # (row, since) for dots fading out
         self.setMouseTracking(True)
@@ -815,6 +829,53 @@ class LyricsView(QWidget):
     def lyrics(self):
         return self._lyrics
 
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @property
+    def synced(self) -> bool:
+        """There are timed lines to follow (the screensaver shows nothing else)."""
+        return self._synced()
+
+    def set_text_size(self, pixels: int) -> None:
+        """Bigger words for the screensaver. _ensure_layout caches on the widget
+        size alone, so the cache has to be dropped by hand or every row keeps
+        the metrics of the old size and the lines overlap."""
+        pixels = max(12, int(pixels))
+        if pixels == self._font.pixelSize():
+            return
+        self._font.setPixelSize(pixels)
+        self._layout_width = None
+        self._layout = []
+        if self._synced():
+            self._follow()
+        self.update()
+
+    def set_screensaver(self, on: bool) -> None:
+        """The screensaver look: the sung line at 0.82 white, one line either
+        side, and nothing else drawn at all — fewer lit pixels on a panel that
+        is going to hold this for hours, and a much cheaper repaint at full
+        screen, where a full page of wrapped lines is redrawn ~28 times per line
+        change by the scroll animation."""
+        on = bool(on)
+        if on != self._screensaver:
+            self._screensaver = on
+            # Nearly centred, rather than a third down: on a page the sung line
+            # sits high so the words to come are readable, and in a screensaver
+            # there is nothing else in the column to read.
+            self._focus = 0.44 if on else self._FOCUS
+            self._layout_width = None
+            if self._synced():
+                self._follow()
+            self.update()
+
+    def set_dim(self, level: float) -> None:
+        level = max(0.0, min(1.0, float(level)))
+        if abs(level - self._dim) > 0.004:
+            self._dim = level
+            self.update()
+
     def set_status(self, text: str) -> None:
         self._lyrics = None
         self._status = text
@@ -830,6 +891,7 @@ class LyricsView(QWidget):
         self._scroll = 0.0
         self._leaving = None
         self._sync_pulse()
+        self.status_changed.emit(text)
         self.update()
 
     def set_lyrics(self, lyrics) -> None:
@@ -855,6 +917,7 @@ class LyricsView(QWidget):
         if self._synced():
             self.set_position(self._position_now())
         self._sync_pulse()
+        self.lyrics_changed.emit(lyrics)
         self.update()
 
     def set_accent(self, colour: str) -> None:
@@ -915,7 +978,7 @@ class LyricsView(QWidget):
         # the scroll can't go above zero and the opening lines sit jammed at
         # the top while the rest of the song plays a third of the way down.
         synced = self._synced()
-        top = self.height() * self._FOCUS - 20 if synced else 24.0
+        top = self.height() * self._focus - 20 if synced else 24.0
         self._layout = []
         for row in self._rows:
             if row.kind in _DOT_KINDS:
@@ -959,7 +1022,7 @@ class LyricsView(QWidget):
             return
         index = max(0, self._current)
         top, height, _ = self._layout[min(index, len(self._layout) - 1)]
-        target = max(0.0, top + 20 + height / 2 - self.height() * self._FOCUS)
+        target = max(0.0, top + 20 + height / 2 - self.height() * self._focus)
         self._animation.stop()
         self._animation.setStartValue(self._scroll)
         self._animation.setEndValue(target)
@@ -971,12 +1034,41 @@ class LyricsView(QWidget):
 
     # --- the dots ---------------------------------------------------------------
 
-    def _sync_pulse(self) -> None:
-        """Breathe only while the dots are up, the music is playing and this is on screen."""
+    def set_driven(self, driven: bool) -> None:
+        """Take the dots' frames from somebody else's clock instead of this one.
+
+        The screensaver drives the record, the band and this from the record's
+        50 ms timer, because every timer that fires in a pass of its own is
+        another flush of the window's backing store. Measured full screen with
+        the intro dots up: 37.4 paints of the overlay a second, 17.0 of them the
+        dots' own 88x47 rectangle.
+        """
+        self._driven = bool(driven)
+        self._sync_pulse()
+
+    def tick(self) -> None:
+        """One dots frame, from the clock that is driving this (see set_driven).
+
+        The test is deliberately looser than _pulse_wanted's: _on_pulse ends by
+        calling _sync_pulse, which is what lets go of a row on its way out, so
+        the last frame of the fade has to be drawn before that happens — the
+        same order the timer gave it.
+        """
+        if not self._driven or not _on_screen(self):
+            return
+        if (self.waiting and self._playing) or self._leaving is not None:
+            self._on_pulse()
+
+    def _pulse_wanted(self) -> bool:
+        """Also lets go of a row whose fade has finished."""
         leaving = self._leaving is not None and time.monotonic() - self._leaving[1] < self._FADE
         if not leaving:
             self._leaving = None
-        wanted = _on_screen(self) and ((self.waiting and self._playing) or leaving)
+        return bool(_on_screen(self) and ((self.waiting and self._playing) or leaving))
+
+    def _sync_pulse(self) -> None:
+        """Breathe only while the dots are up, the music is playing and this is on screen."""
+        wanted = self._pulse_wanted() and not self._driven
         if wanted and not self._pulse.isActive():
             self._pulse.start()
         elif not wanted and self._pulse.isActive():
@@ -1096,11 +1188,26 @@ class LyricsView(QWidget):
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
         self._pulse.stop()
+        # Hiding a widget does not stop an animation it started. _follow()'s is
+        # 460 ms of QVariantAnimation driving update() at 60 Hz, and the page's
+        # lyrics keep being fed while the screensaver covers them, so this went
+        # on repainting a widget nobody could see (caught running in 1 of 20
+        # half-second samples). Snap to where it was going, so the words are in
+        # the right place when the page comes back.
+        if self._animation.state() != QAbstractAnimation.State.Stopped:
+            end = self._animation.endValue()
+            self._animation.stop()
+            if end is not None:
+                self._scroll = float(end)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._dim < 1.0:
+            painter.setOpacity(self._dim)
         if self._status:
+            if self._screensaver:
+                return      # no status string parked in one place all night
             font = QFont(self._font)
             font.setPixelSize(20)
             font.setWeight(QFont.Weight.DemiBold)
@@ -1111,6 +1218,8 @@ class LyricsView(QWidget):
 
         self._ensure_layout()
         synced = self._synced()
+        if self._screensaver and not synced:
+            return          # nothing to follow; the screensaver shows the song's name instead
         painter.setFont(self._font)
         clip = QRectF(event.rect())
         # Fade lines out towards the top and bottom edges.
@@ -1121,7 +1230,13 @@ class LyricsView(QWidget):
                 continue
             if y + line_height + 10 < clip.top() or y - 10 > clip.bottom():
                 continue
-            if not synced:
+            if self._screensaver:
+                away = abs(index - self._current)
+                if away > 2:
+                    continue
+                alpha = (_SAVER_ALPHA[away] if self._current >= 0
+                         else _SAVER_ALPHA[2])
+            elif not synced:
                 alpha = 215
             elif index == self._current:
                 alpha = 255
@@ -1176,6 +1291,14 @@ class QueuePanel(QWidget):
         self._mode = QLabel()
         self._mode.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 9pt;")
         header.addWidget(self._mode)
+        # The way people actually end up with a playlist: they built the queue
+        # by hand and want to keep it. The queue is untouched by saving it.
+        self._save = QPushButton("Save as playlist")
+        self._save.setObjectName("Ghost")
+        self._save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._save.clicked.connect(self._save_as_playlist)
+        header.addSpacing(10)
+        header.addWidget(self._save)
         layout.addLayout(header)
 
         self._upcoming = TrackList(["number", "title", "artist", "time"], numbering="index")
@@ -1193,12 +1316,23 @@ class QueuePanel(QWidget):
         self._now.set_tracks([current] if current else [])
         self._now.set_current(current["id"] if current else None, self._player.is_playing)
         self._upcoming.set_tracks(self._player.upcoming)
+        self._save.setVisible(bool(current))
         mode = []
         if self._player.shuffle:
             mode.append("Smart shuffle")
         if self._player.repeat != "off":
             mode.append("Repeat " + ("all" if self._player.repeat == "all" else "one"))
         self._mode.setText("  ·  ".join(mode))
+
+    def _save_as_playlist(self) -> None:
+        """Keep the queue as it stands, in order — the song playing included,
+        so the list you save is the list you are hearing."""
+        from .widgets.playlist_menu import new_playlist_with
+
+        queue = self._player.queue      # a copy: the real one moves under a menu
+        ids = [int(track["id"]) for track in queue if track.get("id") is not None]
+        if ids:
+            new_playlist_with(self, "music", ids)
 
     def set_accent(self, colour: str) -> None:
         self._now.set_accent(colour)
@@ -1731,6 +1865,9 @@ class NowPlayingView(QWidget):
     # "Playing from" something that is not an album, an artist or the queue:
     # {"kind": "liked" | "songs" | "search" | ..., "title", "id"}. The window opens it.
     context_requested = Signal(dict)
+    # The lyrics screensaver asking the window for the whole screen, and giving
+    # it back. See ui/screensaver.py.
+    fullscreen_requested = Signal(bool)
 
     TABS = ("lyrics", "queue", "details")
 
@@ -1744,6 +1881,8 @@ class NowPlayingView(QWidget):
         self._background_key: tuple | None = None
         self._shown_second = -1
         self._cover_style = ""
+        self._asked_fullscreen = False
+        self._was_maximized = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 24, 48, 30)
@@ -1775,7 +1914,12 @@ class NowPlayingView(QWidget):
                 top.addSpacing(8)
             top.addWidget(chip, 0, Qt.AlignmentFlag.AlignVCenter)
         self._tabs.idClicked.connect(lambda index: self._side.setCurrentIndex(index))
-        root.addLayout(top)
+        # The row lives in a widget of its own only so the screensaver has
+        # something to hide: a bare layout cannot be turned off, and the sleep
+        # timer's one-second clock is in here.
+        self._top_row = QWidget()
+        self._top_row.setLayout(top)
+        root.addWidget(self._top_row)
 
         body = QHBoxLayout()
         body.setSpacing(56)
@@ -1853,11 +1997,11 @@ class NowPlayingView(QWidget):
         self.next_up = NextUpCard(player)
         left.addWidget(self.next_up)
 
-        left_holder = QWidget()
-        left_holder.setLayout(left)
-        left_holder.setMaximumWidth(520)
-        left_holder.setMinimumWidth(340)
-        body.addWidget(left_holder, 5)
+        self._left_holder = QWidget()
+        self._left_holder.setLayout(left)
+        self._left_holder.setMaximumWidth(520)
+        self._left_holder.setMinimumWidth(340)
+        body.addWidget(self._left_holder, 5)
 
         self._side = QStackedWidget()
         self.lyrics = LyricsView()
@@ -1873,6 +2017,23 @@ class NowPlayingView(QWidget):
         player.track_changed.connect(self._on_track)
         player.state_changed.connect(self._on_state)
         player.position_changed.connect(self._on_position)
+        # The screensaver covers this page rather than replacing it, so
+        # _on_position keeps running and the lyrics keep advancing behind it.
+        # Its lyrics view is built here because it is this module that owns the
+        # class; screensaver.py importing it back would be a cycle.
+        self.screensaver = ScreensaverView(player, LyricsView(),
+                                           ready=self._screensaver_ready, parent=self)
+        self.screensaver.entered.connect(self._on_screensaver_entered)
+        self.screensaver.left.connect(self._on_screensaver_left)
+        self.lyrics.lyrics_changed.connect(self.screensaver.lyrics.set_lyrics)
+        self.lyrics.status_changed.connect(self.screensaver.lyrics.set_status)
+        # F11 starts it without waiting out the idle clock, which is what F11
+        # does on a film. A window shortcut rather than a key event: this page
+        # hardly ever holds the focus itself.
+        self._saver_key = QShortcut(QKeySequence(Qt.Key.Key_F11), self,
+                                    activated=self.start_screensaver)
+        self._saver_key.setEnabled(False)
+
         self.set_cover_style(str(settings.get("music_cover_style", "disc")))
         self._on_track(player.current)
         _sync_transport(self._buttons, player)
@@ -1887,6 +2048,68 @@ class NowPlayingView(QWidget):
     @property
     def current_tab(self) -> str:
         return self.TABS[self._side.currentIndex()]
+
+    def start_screensaver(self) -> None:
+        """F11, or the idle clock running out.
+
+        The setting is checked here as well as in ScreensaverView._eligible:
+        only the idle path went through _eligible, so F11 took over the screen
+        even for somebody who had turned the screensaver off.
+
+        There has to be a song to look at — an empty record on a black screen is
+        not a screensaver — but it does not have to be playing. The idle clock
+        still asks for that (walking away from a paused player is not the same
+        as leaving the music on), while F11 is somebody deciding: PAUSED_DIM and
+        PAUSED_AFTER exist for exactly this picture.
+        """
+        if not settings.get("music_screensaver", True):
+            return
+        if self._player.current and self.isVisible():
+            self.show_tab("lyrics")
+            self.screensaver.enter()
+
+    def _screensaver_ready(self) -> bool:
+        return _on_screen(self) and self.current_tab == "lyrics"
+
+    def _on_screensaver_entered(self) -> None:
+        # Hiding these three is what stops everything behind the overlay:
+        # VinylView's 33 ms timer, the lyrics' breathing dots and the sleep
+        # timer's clock all stop in their own hideEvents.
+        self._asked_fullscreen = not self.window().isFullScreen()
+        # Remembered for the minimised case in _on_screensaver_left, which has
+        # to put the state back itself rather than go through the window.
+        self._was_maximized = self.window().isMaximized()
+        self._top_row.setVisible(False)
+        self._left_holder.setVisible(False)
+        self._side.setVisible(False)
+        if self._asked_fullscreen:
+            self.fullscreen_requested.emit(True)
+
+    def _on_screensaver_left(self) -> None:
+        self._top_row.setVisible(True)
+        self._left_holder.setVisible(True)
+        self._side.setVisible(True)
+        self._shown_second = -1
+        self._on_position(self._player.position, self._player.duration)
+        if self._asked_fullscreen:
+            # Only if it was this that asked: a film already full screen, or a
+            # window the user put there, must come back exactly as it was.
+            self._asked_fullscreen = False
+            window = self.window()
+            if window is not None and window.isMinimized():
+                # Minimising is one of the things that ends the screensaver —
+                # through this view's own hideEvent — and the window's handler
+                # leaves full screen with showNormal()/showMaximized(), either
+                # of which un-minimises. The window somebody just put away came
+                # straight back on screen, full size and lit. Drop the
+                # full-screen bit in place instead, keeping the minimised bit
+                # and whatever the window was before it went full screen.
+                state = window.windowState() & ~Qt.WindowState.WindowFullScreen
+                if self._was_maximized:
+                    state |= Qt.WindowState.WindowMaximized
+                window.setWindowState(state)
+            else:
+                self.fullscreen_requested.emit(False)
 
     @property
     def cover_style(self) -> str:
@@ -1968,6 +2191,14 @@ class NowPlayingView(QWidget):
         self.set_cover_style(str(settings.get("music_cover_style", "disc")))
         self._shown_second = -1
         self._on_position(self._player.position, self._player.duration)
+        self.screensaver.set_watching(True)
+        self._saver_key.setEnabled(True)
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self.screensaver.set_watching(False)
+        self._saver_key.setEnabled(False)
+        self.screensaver.leave("page hidden")
 
     def _open_from_subtitle(self, event) -> None:
         current = self._player.current
@@ -2003,6 +2234,8 @@ class NowPlayingView(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._background = None
+        if self.screensaver.active:
+            self.screensaver.setGeometry(self.rect())
 
     def _compose_background(self) -> QPixmap:
         """Gradient, blurred cover and shade, drawn once per song and size.

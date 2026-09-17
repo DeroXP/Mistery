@@ -16,8 +16,8 @@ from .cards import PosterCard, _REST_INSET
 class MusicTile:
     """What a card needs to draw, for an album or an artist."""
 
-    kind: str                    # album | artist
-    key: object                  # album id, or artist name
+    kind: str                    # album | artist | playlist
+    key: object                  # album id, artist name, or playlist id
     title: str
     subtitle: str = ""
     art: str | None = None
@@ -46,8 +46,13 @@ class AlbumCard(PosterCard):
         menu.addAction("Play next", lambda: self.action_requested.emit("next", item))
         menu.addAction("Add to queue", lambda: self.action_requested.emit("queue", item))
         menu.addSeparator()
-        menu.addAction("Open album" if item.kind == "album" else "Open artist",
+        menu.addAction({"album": "Open album", "artist": "Open artist"}.get(item.kind,
+                                                                            "Open playlist"),
                        lambda: self.action_requested.emit("open", item))
+        if item.kind == "playlist":
+            menu.addSeparator()
+            menu.addAction("Rename…", lambda: self.action_requested.emit("rename", item))
+            menu.addAction("Delete playlist", lambda: self.action_requested.emit("delete", item))
         menu.exec(event.globalPos())
 
 
@@ -124,11 +129,27 @@ def artist_tile(row) -> MusicTile:
                      f"{count} album{'s' if count != 1 else ''}", small, row)
 
 
+def playlist_tile(row, cover: str | None = None) -> MusicTile:
+    """A music playlist as a tile, sized and shaped like an album's.
+
+    `item_count` is what the playlist holds; the subtitle says that rather than
+    what resolves today, so a list whose songs are mid-download or on an
+    unplugged drive does not silently shrink to "0 songs".
+    """
+    row = dict(row)
+    count = int(row.get("item_count") or 0)
+    small = cover.replace(".jpg", "-sm.jpg") if cover else None
+    return MusicTile("playlist", int(row["id"]), row.get("name") or "Untitled",
+                     f"{count} song{'s' if count != 1 else ''}", small, row)
+
+
 def tile_context(tile: MusicTile) -> dict:
-    """"Playing from" for a queue started from a card: the album or the artist,
-    keyed the way the album and artist pages are opened."""
+    """"Playing from" for a queue started from a card: the album, the artist or
+    the playlist, keyed the way each of their pages is opened."""
     if tile.kind == "album":
         return {"kind": "album", "title": tile.title, "id": int(tile.key)}
+    if tile.kind == "playlist":
+        return {"kind": "playlist", "title": tile.title, "id": int(tile.key)}
     return {"kind": "artist", "title": str(tile.key), "id": str(tile.key)}
 
 
@@ -138,6 +159,9 @@ def tile_tracks(tile: MusicTile) -> list[dict]:
 
     if tile.kind == "album":
         rows = library.album_tracks(int(tile.key))
+    elif tile.kind == "playlist":
+        # Already filtered to playable songs, and already in playlist order.
+        return [dict(t) for t in library.playlist_tracks(int(tile.key))]
     else:
         rows = [track for album in library.artist_albums(str(tile.key))
                 for track in library.album_tracks(int(album["id"]))]
@@ -149,7 +173,9 @@ def play_tile(player, action: str, tile: MusicTile) -> None:
     ready = tile_tracks(tile)
     if not ready:
         return
-    in_order = tile.kind == "album"
+    # A playlist is in_order for the same reason an album is: the order is the
+    # point. Shuffling it is what the Shuffle action is for.
+    in_order = tile.kind in ("album", "playlist")
     if action == "play":
         player.play_tracks(ready, 0, in_order=in_order, context=tile_context(tile))
     elif action == "shuffle":

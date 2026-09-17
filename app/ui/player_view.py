@@ -17,9 +17,15 @@ from ..player.audio_filters import build_chain
 from ..player.mpv_process import MpvProcess, MpvUnavailable, quality_preset
 from ..util import fmt_clock
 from .player_overlay import PlayerOverlay
+from .widgets.volume_bar import FINE_STEP, WHEEL_STEP
 
 _SAVE_INTERVAL_MS = 5000
 _GEOMETRY_SYNC_MS = 350
+# How long after the volume stops moving it is written down. One drag of the
+# bar used to rewrite the whole of settings.json once per step — up to 150 of
+# them on the 0-150 range, on the GUI thread (see config.Settings' docstring
+# on what that once cost). mpv is still told at once; only the file waits.
+_VOLUME_SAVE_MS = 400
 
 # Settings that reach mpv only on its command line. The video mpv idles between
 # films for the rest of the session, so Settings' "takes effect the next time
@@ -112,6 +118,14 @@ class PlayerView(QWidget):
 
         self._closing = False
 
+        # An ordered list of media ids to follow, from a playlist, and where in
+        # it this file is. The player has no queue: "what comes next" is asked
+        # for fresh at each of the four places below, so a line-up only has to
+        # answer that question differently. Empty is the normal case and means
+        # next/previous episode, exactly as before.
+        self._line_up: list[int] = []
+        self._line_index = 0
+
         # TV state, reset per file: the show's intro/credits model and what has
         # already fired this playback.
         self._show_id: int | None = None
@@ -165,6 +179,16 @@ class PlayerView(QWidget):
         self._geometry_timer.setInterval(_GEOMETRY_SYNC_MS)
         self._geometry_timer.timeout.connect(self._sync_overlay)
 
+        # A level mpv already has that settings.json has not caught up with.
+        self._volume_pending: int | None = None
+        # ...and the level mpv was last asked for, which is what the bar shows.
+        # See _on_property: mpv answers every step of a drag.
+        self._volume_asked: float | None = None
+        self._volume_save = QTimer(self)
+        self._volume_save.setSingleShot(True)
+        self._volume_save.setInterval(_VOLUME_SAVE_MS)
+        self._volume_save.timeout.connect(self._flush_volume)
+
         # Presence waits a moment after the file opens, until the duration is
         # known. A member rather than a singleShot, so closing can cancel it.
         self._presence_timer = QTimer(self)
@@ -186,6 +210,72 @@ class PlayerView(QWidget):
         self._opening_timer.timeout.connect(self._show_opening)
 
     # --- playback -----------------------------------------------------------
+
+    def set_line_up(self, media_ids: list[int], index: int = 0) -> None:
+        """Follow this list of media ids instead of the show's own order.
+
+        Separate from play() on purpose: _advance_to_next and _go_to_previous
+        call play() themselves, and a line-up reset there would put every
+        playlist back to its first item on the second title.
+
+        A snapshot, taken once at Play: editing the playlist afterwards does not
+        reach the film already running. The music queue behaves the same way,
+        and for the same reason — "what plays next" is a decision you made when
+        you pressed Play, and rewriting it under a film that is half over is
+        the more surprising of the two. It does mean the Up Next card can offer
+        a film you have just taken out of the list; it stops at the end of the
+        list it was given, and the next Play takes a fresh one.
+        """
+        self._line_up = [int(i) for i in media_ids]
+        self._line_index = index if 0 <= index < len(self._line_up) else 0
+
+    def _line_step(self, step: int) -> tuple[int, object] | None:
+        """The playlist entry `step` places along, skipping ones whose file has
+        gone since. (index, media row), or None at the end of the list."""
+        index = self._line_index + step
+        while 0 <= index < len(self._line_up):
+            row = db.get_media(self._line_up[index])
+            if row is not None and not row["missing"]:
+                return index, row
+            index += step
+        return None
+
+    def _next_row(self, item: MediaItem):
+        """What follows this film or episode. Peeks only — the Up Next card is
+        offered long before anything actually moves.
+
+        A playlist answers for itself and stops at its end: playing episode 3
+        as the last entry of a list is not a request for episode 4.
+        """
+        if self._line_up:
+            found = self._line_step(1)
+            return found[1] if found else None
+        return db.next_episode(item.id) if item.is_episode else None
+
+    def _previous_row(self, item: MediaItem):
+        if self._line_up:
+            found = self._line_step(-1)
+            return found[1] if found else None
+        return db.previous_episode(item.id) if item.is_episode else None
+
+    def _refresh_nav(self) -> None:
+        """Tell the overlay what is on either side of the film on screen.
+
+        Set when a file loads, and again when a jump did not load one: the
+        buttons were then describing the position the cursor never reached.
+
+        First argument is "there is something to move to", not "this is an
+        episode": a playlist of films has a previous and a next too, and the
+        autoplay tick belongs with them.
+        """
+        item = self._item
+        if item is None:
+            return
+        self.overlay.set_episode_nav(
+            item.is_episode or bool(self._line_up),
+            bool(self._previous_row(item)),
+            bool(self._next_row(item)),
+        )
 
     def play(self, item: MediaItem, start_at: float | None = None) -> bool:
         """Load a file. Returns False if it cannot be played."""
@@ -225,11 +315,15 @@ class PlayerView(QWidget):
         self.overlay.set_tracks([], [])
         self.overlay.set_thumbnails(item.thumbs)
         self.overlay.set_boost(bool(settings.get("dialogue_boost")))
-        self.overlay.set_episode_nav(
-            item.is_episode,
-            bool(item.is_episode and db.previous_episode(item.id)),
-            bool(item.is_episode and db.next_episode(item.id)),
-        )
+        # _advance_to_next and _go_to_previous move the cursor before calling
+        # play(); a Play from outside has to find where it landed. A film listed
+        # twice then starts from its first copy, the way the music queue does
+        # with a song queued twice.
+        if self._line_up and not (0 <= self._line_index < len(self._line_up)
+                                  and self._line_up[self._line_index] == item.id):
+            self._line_index = (self._line_up.index(item.id)
+                                if item.id in self._line_up else 0)
+        self._refresh_nav()
         self.overlay.set_autoplay(bool(settings.get("autoplay_next", True)))
         self.overlay.set_quality(
             quality_preset(settings.get("video_quality", "balanced")), ""
@@ -271,6 +365,7 @@ class PlayerView(QWidget):
             # Changed in Settings since mpv started, and nothing is on screen:
             # an idle mpv quits in a moment, and a fresh one reads them all.
             self.mpv.terminate()
+        self._flush_volume()            # mpv reads --volume off the settings file
         self.surface.show()
         window_id = int(self.surface.winId())
         try:
@@ -280,7 +375,7 @@ class PlayerView(QWidget):
             return False
         self._launched_with = self._launch_settings()
         self._quality_applied = quality_preset(settings.get("video_quality", "balanced"))
-        self.mpv.set_volume(int(settings.get("volume", 80)))
+        self._volume_asked = self.mpv.set_volume(self._volume_level())
         self._apply_boost(bool(settings.get("dialogue_boost")))
         return True
 
@@ -489,7 +584,7 @@ class PlayerView(QWidget):
                 self._offer_next_episode()
 
     def _offer_next_episode(self) -> None:
-        row = db.next_episode(self._item.id) if self._item else None
+        row = self._next_row(self._item) if self._item else None
         if row is None:
             return
         self._next_card_shown = True
@@ -519,7 +614,9 @@ class PlayerView(QWidget):
         if not self._active or self._item is None:
             return
         finished = self._item
-        row = db.next_episode(finished.id)
+        step = self._line_step(1) if self._line_up else None
+        row = step[1] if step else (None if self._line_up else
+                                    (db.next_episode(finished.id) if finished.is_episode else None))
         if row is None and not mark_watched:
             return      # N on a finale does what its greyed-out button does
         # Save first and mark after. play() saves the outgoing episode too, and
@@ -535,12 +632,21 @@ class PlayerView(QWidget):
         # Hand the Up Next still over before the card disappears, so the next
         # episode grows out of it instead of cutting through black.
         pixmap, rect = self.overlay.next_card_snapshot()
+        was_at = self._line_index
+        if step is not None:
+            self._line_index = step[0]      # before play(), which trusts the cursor
         # No start point: a next episode you are part-way through resumes.
         if not self.play(MediaItem.from_row(db.get_media(int(row["id"])))):
             # Its file has gone, and play() said so over the picture. This one
             # plays on, unmarked; its own end offers whatever comes after (the
             # missing file is marked now, so that skips it).
             self._position = position
+            # And the cursor goes back to the film that is still on screen.
+            # Left on the one that would not load, Previous walked back from
+            # there and landed on this film — pressing it restarted what you
+            # were already watching.
+            self._line_index = was_at
+            self._refresh_nav()
             if mark_watched and self._ending:
                 # Up Next on the held last frame: that end has already been, so
                 # offer the episode after the missing one straight away.
@@ -556,10 +662,19 @@ class PlayerView(QWidget):
     def _go_to_previous(self) -> None:
         if not self._active or self._item is None:
             return
-        row = db.previous_episode(self._item.id)
+        step = self._line_step(-1) if self._line_up else None
+        row = step[1] if step else (None if self._line_up else
+                                    db.previous_episode(self._item.id))
         if row is None:
             return
-        self.play(MediaItem.from_row(db.get_media(int(row["id"]))), start_at=0.0)
+        was_at = self._line_index
+        if step is not None:
+            self._line_index = step[0]
+        if not self.play(MediaItem.from_row(db.get_media(int(row["id"]))), start_at=0.0):
+            # Same as _advance_to_next: the film on screen plays on, so the
+            # cursor belongs where it was, not on the file that would not open.
+            self._line_index = was_at
+            self._refresh_nav()
 
     def _on_end_file(self, reason: str) -> None:
         if reason not in ("eof", "error"):
@@ -578,7 +693,7 @@ class PlayerView(QWidget):
         db.set_watched(item.id, True)
         self.progress_changed.emit()
 
-        row = db.next_episode(item.id) if item.is_episode else None
+        row = self._next_row(item)
         if row is not None and not self._next_card_declined:
             if self.overlay.next_card.isVisible():
                 # --keep-open paused on the last frame, which is not you
@@ -625,10 +740,13 @@ class PlayerView(QWidget):
         self._next_card_declined = False
         self._item = None
         self._show_id = None
+        self._line_up = []
+        self._line_index = 0
         self._position = 0.0
         self._duration = 0.0
 
     def stop_and_close(self) -> None:
+        self._flush_volume()
         self._end_session()
         self.mpv.stop()
         self.presence.clear()
@@ -639,6 +757,7 @@ class PlayerView(QWidget):
 
     def shutdown(self) -> None:
         self._closing = True
+        self._flush_volume()            # a level set in the last 400 ms is still only in mpv
         self.presence.clear()
         self.presence.stop()
         self._end_session()
@@ -739,9 +858,18 @@ class PlayerView(QWidget):
             if not (self._paused and self.mpv.cached("eof-reached")):
                 self.overlay.next_card.hold(self._paused)
         elif name in ("volume", "mute"):
-            self.overlay.set_volume(
-                float(self.mpv.cached("volume", 0) or 0), bool(self.mpv.cached("mute"))
-            )
+            # The level we asked mpv for, not the one it is still catching up to:
+            # mpv answers every step of a drag, and the backlog lands after the
+            # button is up. Sampling the bar every 2 ms across three drags, one
+            # of them showed 67 and then 80 for 0.313 s after a release on 137.
+            # Nothing but this view moves a film's volume — mpv runs with
+            # --no-input-default-bindings and --input-vo-keyboard=no — so an echo
+            # that is not the level we asked for is old news. set_volume hands
+            # back what it really sent, clamp included.
+            volume = self._volume_asked
+            if volume is None:
+                volume = float(self.mpv.cached("volume", 0) or 0)
+            self.overlay.set_volume(volume, bool(self.mpv.cached("mute")))
         elif name == "track-list":
             self.overlay.set_tracks(self.mpv.tracks("audio"), self.mpv.tracks("sub"))
         elif name == "chapter-list":
@@ -766,9 +894,28 @@ class PlayerView(QWidget):
         if "error" in text.lower():
             self.error.emit(text)
 
+    def _volume_level(self) -> int:
+        """The level, including one the debounce has not written down yet."""
+        if self._volume_pending is not None:
+            return self._volume_pending
+        return int(settings.get("volume", 80))
+
     def _on_volume_changed(self, value: int) -> None:
-        self.mpv.set_volume(value)
-        settings.set("volume", int(value))
+        self._volume_asked = self.mpv.set_volume(value)
+        if self.mpv.cached("mute"):
+            # Moving the volume while muted used to change a silent number and
+            # leave the film silent — the one thing nobody means by it.
+            self.mpv.set_property("mute", False)
+        self._volume_pending = int(value)
+        self._volume_save.start()
+
+    def _flush_volume(self) -> None:
+        """Write the level down: the debounce ran out, mpv is about to be
+        started from the setting, or the film is closing."""
+        self._volume_save.stop()
+        pending, self._volume_pending = self._volume_pending, None
+        if pending is not None and pending != int(settings.get("volume", 80)):
+            settings.set("volume", pending)
 
     def _on_speed(self, speed: float) -> None:
         self.mpv.set_speed(speed)
@@ -907,11 +1054,19 @@ class PlayerView(QWidget):
         elif key == Qt.Key.Key_L:
             self.mpv.seek(step * 3)
         elif key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            # Stepped from the level we asked mpv for, which is the one the bar
+            # is showing: mpv's cached echo can still be catching up with a drag,
+            # and a key pressed then stepped from a number nobody could see.
             # 0 is a volume, not a missing one: `or 80` made Down at silence 75.
-            volume = self.mpv.cached("volume")
-            volume = settings.get("volume", 80) if volume is None else volume
-            delta = 5 if key == Qt.Key.Key_Up else -5
-            # Through the slider's handler, so the keys are remembered as well.
+            volume = self._volume_asked
+            if volume is None:
+                volume = self.mpv.cached("volume")
+            volume = self._volume_level() if volume is None else volume
+            # The same notch as the wheel and the bar, Shift for one unit.
+            delta = FINE_STEP if modifiers & Qt.KeyboardModifier.ShiftModifier else WHEEL_STEP
+            if key == Qt.Key.Key_Down:
+                delta = -delta
+            # Through the bar's handler, so the keys are remembered as well.
             self._on_volume_changed(max(0, min(150, int(round(float(volume))) + delta)))
         elif key == Qt.Key.Key_M:
             self.mpv.command("cycle", "mute")

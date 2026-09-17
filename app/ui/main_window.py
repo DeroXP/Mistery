@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QCursor, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPushButton, QStackedWidget, QVBoxLayout, QWidget,
@@ -25,6 +25,7 @@ from .detail_view import DetailView
 from .home_view import HomeView
 from .library_view import LibraryView
 from .music_view import MusicView
+from .playlists_view import PlaylistsView
 from .now_playing import NowPlayingBar, NowPlayingView
 from .player_view import PlayerView
 from .settings_view import SettingsView
@@ -39,12 +40,14 @@ _NAV = [
     ("film", "Movies"),
     ("tv", "Shows"),
     ("music", "Music"),
+    ("queue", "Playlists"),
     ("search", "Search"),
     ("settings", "Settings"),
 ]
 _NAV_SEARCH = next(i for i, (name, _) in enumerate(_NAV) if name == "search")
 _NAV_SETTINGS = next(i for i, (name, _) in enumerate(_NAV) if name == "settings")
 _NAV_MUSIC = next(i for i, (name, _) in enumerate(_NAV) if name == "music")
+_NAV_PLAYLISTS = next(i for i, (name, _) in enumerate(_NAV) if name == "queue")
 
 
 class NavButton(QPushButton):
@@ -125,13 +128,15 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsView()
         self.player = PlayerView()
         self.music_page = MusicView(self.music)
+        self.playlists_page = PlaylistsView()
         self.album_page = AlbumView(self.music)
         self.artist_page = ArtistView(self.music)
         self.now_playing = NowPlayingView(self.music)
 
         for page in (self.home, self.movies, self.shows, self.search,
                      self.detail, self.show_page, self.settings_page, self.player,
-                     self.music_page, self.album_page, self.artist_page, self.now_playing):
+                     self.music_page, self.playlists_page, self.album_page, self.artist_page,
+                     self.now_playing):
             self.stack.addWidget(page)
 
         # Spotify's defining piece of furniture: the player that follows you.
@@ -250,6 +255,14 @@ class MainWindow(QMainWindow):
             view.open_show.connect(self.open_show)
             view.add_folder_requested.connect(self._add_folder)
 
+        # Not a bare play(): the rest of the playlist goes with it, so Up Next
+        # and autoplay work for a list of films the way they do for a series.
+        self.playlists_page.play_requested.connect(
+            lambda item: self.play(item, line_up=self.playlists_page.line_up))
+        self.playlists_page.item_action.connect(self._on_card_action)
+        self.playlists_page.open_media.connect(self.open_media)
+        self.playlists_page.open_playlist.connect(self.open_playlist)
+
         self.show_page.item_action.connect(self._on_card_action)
 
         self.detail.play_requested.connect(self.play)
@@ -285,6 +298,12 @@ class MainWindow(QMainWindow):
 
         self.music_page.album_opened.connect(self.open_album)
         self.music_page.artist_opened.connect(self.open_artist)
+        # "Added to Road trip." from a song's right-click menu. The music pages
+        # have no status bar of their own, and the page itself does not change
+        # when a song joins a list that is not on screen.
+        self.music_page.status.connect(self._on_status)
+        self.album_page.status.connect(self._on_status)
+        self.artist_page.status.connect(self._on_status)
         self.album_page.back_requested.connect(self.go_back)
         self.album_page.artist_requested.connect(self.open_artist)
         self.artist_page.back_requested.connect(self.go_back)
@@ -299,6 +318,11 @@ class MainWindow(QMainWindow):
         # album_requested / artist_requested above, and the rest (Liked Songs,
         # Songs, a search) as the context itself.
         self.now_playing.context_requested.connect(self.open_context)
+        # The lyrics screensaver takes the whole screen for itself, and gives it
+        # back when it ends. It asks rather than calling showFullScreen, because
+        # leaving full screen has to put a maximised window back as it was
+        # (_set_fullscreen) and the film player uses the same route.
+        self.now_playing.fullscreen_requested.connect(self._set_fullscreen)
 
         self.music.track_changed.connect(self._on_music_track)
         self.music.state_changed.connect(self._on_music_state)
@@ -336,6 +360,14 @@ class MainWindow(QMainWindow):
                       autoRepeat=False),
             QShortcut(QKeySequence("Ctrl+Right"), self, activated=self.music.next),
             QShortcut(QKeySequence("Ctrl+Left"), self, activated=self.music.previous),
+            # There was no way to change the music volume without the mouse.
+            # Ctrl with the up/down arrows, Shift for single steps, Ctrl+M to
+            # mute — off while a film is on screen, like the rest of these.
+            QShortcut(QKeySequence("Ctrl+Up"), self, activated=lambda: self._nudge_music_volume(5)),
+            QShortcut(QKeySequence("Ctrl+Down"), self, activated=lambda: self._nudge_music_volume(-5)),
+            QShortcut(QKeySequence("Ctrl+Shift+Up"), self, activated=lambda: self._nudge_music_volume(1)),
+            QShortcut(QKeySequence("Ctrl+Shift+Down"), self, activated=lambda: self._nudge_music_volume(-1)),
+            QShortcut(QKeySequence("Ctrl+M"), self, activated=self._toggle_music_mute),
             # The media keys too. Qt passes a media key on to Windows unless a
             # shortcut claims it (QTBUG-43343, qwindowskeymapper.cpp), and
             # Windows hands it to the active media session, which is Mistery's
@@ -352,6 +384,21 @@ class MainWindow(QMainWindow):
         ]
         for shortcut in self._music_shortcuts:
             shortcut.setEnabled(False)
+
+    def _nudge_music_volume(self, step: int) -> None:
+        # Reaching for the volume is never a way of asking to stay silent, so
+        # a press unmutes — but a press asking for quieter has to be quieter,
+        # or Ctrl+Down out of silence is full volume, which at night is the
+        # one thing nobody means by it. The bar does the same: it sets the
+        # level you dragged to and unmutes on the way.
+        if self.music.muted:
+            self.music.set_muted(False)
+            if step > 0:
+                return
+        self.music.set_volume(max(0, min(100, int(self.music.volume) + step)))
+
+    def _toggle_music_mute(self) -> None:
+        self.music.set_muted(not self.music.muted)
 
     def _on_back_shortcut(self) -> None:
         # Window-wide shortcuts fire before the player's own key handling, and
@@ -373,10 +420,21 @@ class MainWindow(QMainWindow):
     # --- navigation ---------------------------------------------------------
 
     def _on_nav(self, index: int) -> None:
-        page = [self.home, self.movies, self.shows, self.music_page, self.search,
-                self.settings_page][index]
+        # Parallel to _NAV, and it has to stay that way: an entry added to one
+        # list and not the other silently shifts every page after it.
+        page = [self.home, self.movies, self.shows, self.music_page, self.playlists_page,
+                self.search, self.settings_page][index]
         if page is self.search:
             self.search.focus_search()
+        elif page is self.playlists_page:
+            self.playlists_page.show_playlist(None)
+        elif page is self.music_page:
+            # Same answer as Playlists above: a nav entry is "take me to that
+            # page", not "take me back to where I was in it". Without this,
+            # MusicView.reload early-returns into whatever playlist was last
+            # opened, and _on_nav has just cleared the history so Back is no
+            # help either — the page's own arrow was the only way out.
+            self.music_page.show_tab(self.music_page.current_tab)
         self._history.clear()
         self._go(page, push=False)
         self._sync_nav(index)
@@ -414,6 +472,8 @@ class MainWindow(QMainWindow):
             return self.detail._item
         if page is self.show_page:
             return self.show_page._show
+        if page is self.playlists_page:
+            return self.playlists_page.playlist_id
         return None
 
     def go_back(self) -> None:
@@ -436,6 +496,11 @@ class MainWindow(QMainWindow):
             page.set_media(state)
         elif page is self.show_page and state is not None and state.id != page._show.id:
             page.set_show(state)
+        elif page is self.playlists_page and state != page.playlist_id:
+            # One page serves every playlist, as the album page serves every
+            # album: point it back at the list this history entry was showing.
+            page.show_playlist(state)
+            page.reload()
         elif hasattr(page, "reload") and page not in (self.detail, self.show_page):
             page.reload()
 
@@ -547,6 +612,20 @@ class MainWindow(QMainWindow):
         self._go(self.album_page)
         self._sync_nav(None)
 
+    def open_playlist(self, playlist_id: int) -> None:
+        """One video playlist, from a card or from "Playing from".
+
+        Checked before the page is pointed at it, the way open_album is: a page
+        with nothing to show asks to go back from inside its own reload, and
+        while it is still hidden that pops the history of the page you are on.
+        """
+        if db.playlist(int(playlist_id)) is None:
+            self._on_status("That playlist is no longer there.")
+            return
+        self.playlists_page.show_playlist(int(playlist_id))
+        self._go(self.playlists_page)
+        self._sync_nav(_NAV_PLAYLISTS)
+
     def open_artist(self, name: str) -> None:
         if not name:
             return
@@ -596,6 +675,22 @@ class MainWindow(QMainWindow):
             # Songs shows every liked song rather than a filtered few.
             search = str(ident or "") if kind in ("search", "liked") else ""
             self.music_page.show_tab("liked" if kind == "liked" else "songs", search)
+            self._go(self.music_page)
+            self._sync_nav(_NAV_MUSIC)
+        elif kind == "playlist":
+            # Music playlists only: a film has no "Playing from". The page keeps
+            # the list open over its tabs, so show_tab is not the way in.
+            try:
+                playlist_id = int(ident)
+            except (TypeError, ValueError):
+                return
+            # Checked here as well as in open_playlist: a playlist deleted while
+            # its songs played on left "Playing from" pointing at nothing, and
+            # the page showed the old title and rows anyway.
+            if db.playlist(playlist_id) is None:
+                self._on_status("That playlist is no longer there.")
+                return
+            self.music_page.show_playlist(playlist_id)
             self._go(self.music_page)
             self._sync_nav(_NAV_MUSIC)
         elif kind == "queue":
@@ -743,10 +838,14 @@ class MainWindow(QMainWindow):
             return QRect()
         return QRect(surface.mapToGlobal(QPoint(0, 0)), surface.size())
 
-    def play(self, item: MediaItem, start_at: float | None = None) -> None:
+    def play(self, item: MediaItem, start_at: float | None = None,
+             line_up: tuple[list[int], int] | None = None) -> None:
         fresh = db.get_media(item.id)
         if fresh is not None:
             item = MediaItem.from_row(fresh)
+        # Set on every play, not only the playlist ones: a film started from
+        # Home after a playlist must not inherit the playlist's line-up.
+        self.player.set_line_up(*(line_up or ([], 0)))
         # Background scanning and thumbnailing must not compete with playback.
         if settings.get("pause_background_during_playback", True):
             self.service.set_paused(True)
@@ -804,11 +903,30 @@ class MainWindow(QMainWindow):
                 self.open_show(item)
             else:
                 self.open_media(item)
+        elif action == "playlist":
+            # The card emitted an action and stopped there (cards never touch
+            # the database); the second menu is popped here, at the pointer.
+            from .widgets.playlist_menu import add_to_playlist_menu
+
+            menu = add_to_playlist_menu(self, "video", [item.id], self._on_playlist_change)
+            menu.exec(QCursor.pos())
         elif action == "watched":
             db.set_watched(item.id, not item.watched)
             self.reload_all()
         elif action == "folder":
             reveal_in_explorer(item.path)
+
+    def _on_playlist_change(self, message: str) -> None:
+        """A playlist was added to or taken from. db.data_version deliberately
+        does not report our own writes, so _check_external_changes will never
+        notice: reload the page that is on screen.
+
+        The line goes up after the reload, not before: reload_all ends with
+        _on_status(""), which paints the library totals over anything already
+        there, so "Added to Films." never survived its own click.
+        """
+        self.reload_all()
+        self._on_status(message)
 
     def play_in_vr(self, item: MediaItem) -> None:
         """Hand the file to a VR player, or explain what's missing."""
@@ -883,6 +1001,20 @@ class MainWindow(QMainWindow):
             self.home.reload()
 
     def _set_fullscreen(self, fullscreen: bool) -> None:
+        if not fullscreen and (self.isHidden() or self.isMinimized()):
+            # Giving the screen back must never mean coming back on screen.
+            # Minimising, or closing to the tray, hides Now Playing; its
+            # hideEvent ends the screensaver; the screensaver asks for full
+            # screen off — and a show*() here put the window straight back up,
+            # maximised, half a second after Win+D, and left a close-to-tray
+            # visible with _in_tray already True. Same flags, no show: the
+            # minimised/hidden bit is kept, so whatever un-hides it next
+            # (show_from_tray, the taskbar) gets the size it expected.
+            state = self.windowState() & ~Qt.WindowState.WindowFullScreen
+            if self._maximized_before_fullscreen:
+                state |= Qt.WindowState.WindowMaximized
+            self.setWindowState(state)
+            return
         if fullscreen:
             # Fullscreen replaces the maximised state rather than adding to it,
             # so it's remembered here: leaving with showNormal() handed a
@@ -929,7 +1061,7 @@ class MainWindow(QMainWindow):
         self._data_version = db.data_version()
         current = self.stack.currentWidget()
         for page in (self.home, self.movies, self.shows, self.search, self.settings_page,
-                     self.music_page, self.album_page, self.artist_page):
+                     self.music_page, self.playlists_page, self.album_page, self.artist_page):
             if page is current or page is self.home:
                 page.reload()
         if current is self.detail and self.detail._item.id:

@@ -129,6 +129,39 @@ Settings page shows what was found.
   primary action is white — that restraint is what makes a dark page read as a
   streaming app rather than a dark app with a coloured button
 
+**Finding things in a big library**
+- **Categories** on Movies and Shows: tick as many as you like — Anime, Romance,
+  Action — and the page narrows to them. *Any* is the default (a film that is
+  either), *All* is one click away (a film that is both). What you tick is still
+  ticked tomorrow
+- Four services name genres four different ways: TMDB says "Sci-Fi & Fantasy"
+  for a series and "Science Fiction" for a film, TVmaze says "Science-Fiction",
+  Wikidata says "science fiction film". They are mapped onto one list of names,
+  so one chip means one thing. The old filter compared your choice against the
+  whole genre line, which quietly put every *Sci-Fi & Fantasy* series under
+  **Fantasy** and every *Action & Adventure* one under **Action**
+- **Without a TMDB key, films used to have no genres at all** — 0 of 12 in the
+  library this was built against. Mistery now asks Wikidata (through the
+  Wikipedia article it already fetched) and then iTunes, both keyless: 11 of
+  those 12 films got categories in 16 seconds, and nothing at all on the next
+  pass, because both answers are cached for a month. A guess is only ever
+  written where there was nothing; data from TMDB is never overwritten
+- **Set your own** on a film or series page. Hand-picked categories live in
+  their own column, so re-fetching titles and artwork cannot wipe them
+
+**Playlists**
+- **Playlists** in the top navigation for films and episodes, and a
+  **Playlists** tab on the Music page for songs. Right-click anything —
+  a song in any list, a film tile, an episode — and *Add to playlist*; the
+  playlists you are already in are ticked
+- **Play all** on a film playlist plays it through: when one ends, the next one
+  starts, and the Up Next card names it instead of the next episode. Starting
+  anything else from anywhere else drops the line-up, so a playlist cannot
+  follow you around
+- Reorder and remove from the same right-click menu. A playlist is a list of
+  library ids, so a rescan, a renamed folder or a finished download leaves it
+  alone, and anything whose file has gone is skipped rather than deleted
+
 **Preview and handover**
 - **Continue Watching tiles preview on hover**, starting at the frame you
   stopped on. No second decoder and no extra process: it animates the seek
@@ -380,6 +413,23 @@ Songs — with a player bar that follows you around the whole app and a full
 - **Before the singing starts** — Fist's first line is two minutes in, and an
   empty lyrics view looked broken. Breathing dots hold the place of the next
   line through an intro or a long instrumental gap
+- **A screensaver for the lyrics tab.** Leave a song playing and don't touch
+  anything for three minutes: Mistery goes full screen and shows the record
+  turning, the words at the size of a poster, and the song's own shape as a
+  waveform underneath, on black. F11 starts it at once. It is built to be left
+  running on an OLED — the whole picture drifts 24 px over six minutes (0.4 px
+  a second: invisible while you watch, 48 px of travel while you don't), it
+  dims as the hours pass, nothing bright sits still, and it does **not** hold
+  the display awake, because letting Windows blank the panel is the best
+  protection there is
+- **It ends when you actually move the mouse**, not when the mouse twitches.
+  96 px of travel, measured from an anchor that resets after two seconds of
+  stillness — so a night of 1 px drift never adds up to an exit — and at least
+  two movements 50 ms apart, so a single jump (a remote desktop reconnecting, a
+  game warping the pointer, a monitor waking) doesn't count either. A click, the
+  wheel, Esc or any other key ends it immediately; play/pause, the media keys
+  and the volume keys act without ending it. Switch it off, or change the three
+  minutes, in Settings → Music
 - **Output** in the Sound panel switches between headphones and speakers
   without stopping the song. If the headphones you chose are unplugged, the song
   carries on on the Windows default from where it was, or stays paused if it
@@ -395,6 +445,35 @@ saved a moment after anything changes and every 15 seconds while playing, to
 `music-session.json` in the data folder; songs deleted since are skipped, and a
 song saved in its last couple of seconds starts again from the top. Switch it
 off in Settings → Music.
+
+### The volume bar
+
+The same painted bar now serves the player bar, Now Playing and the film
+player, and it behaves the way a volume control should:
+
+- **Click where you mean it.** A click used to be a 10-unit page step, so the
+  only way to reach a number was to drag. Now the bar lands exactly where you
+  click — the first pixel is silence and the last one is the top of the range —
+  keeps following the pointer when it leaves the widget mid-drag, and shows the
+  number while you hold it
+- **The wheel** works over the bar and over the film picture: 5 a notch, 1 with
+  Shift. **Ctrl+↑/↓** does the same for music from the keyboard, with Shift for
+  single steps, and **Ctrl+M** mutes — there was no way to change the music
+  volume without the mouse before
+- **Mute is a state, not a level of zero.** It is mpv's own mute, so the bar
+  keeps the level it was at, remembers it across a restart, and reaching for the
+  volume unmutes rather than changing a number nobody can hear — Ctrl+↓ out of
+  silence comes back one step quieter, not at whatever it was before
+- **The bottom of the bar is no longer dead.** mpv's volume is cubic — 20 was
+  −42 dB, so the first tenth of the travel was silence with extra steps. The bar
+  maps travel to about 0.4 dB per percent, which spreads roughly 40 dB across
+  its length. The number stored is still mpv's own, because the sleep timer's
+  fade multiplies it; only the mapping from pixels changed. If you had it at
+  70, the handle now sits further right for exactly the same loudness
+- **It stopped writing to disk on every pixel.** Dragging used to save
+  settings.json once per step — the file whose own notes blame "every volume
+  tick" for a past corruption. mpv hears every step immediately; the file is
+  written 400 ms after you stop
 
 ### Sound
 

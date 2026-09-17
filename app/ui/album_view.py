@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
+from .. import db
 from ..music import library
 from ..music.tags import quality_label
 from ..util import fmt_duration, fmt_size
@@ -16,6 +17,7 @@ from .widgets.artview import ArtView
 from .widgets.flow import FlowLayout
 from .widgets.icons import IconButton, icon_pixmap
 from .widgets.music_cards import AlbumCard, album_tile, play_tile
+from .widgets.playlist_menu import ask_name, confirm_delete, display_name, move_entry
 from .widgets.tracklist import TrackList, apply_liked, track_menu
 
 _HEADER = 380
@@ -68,6 +70,11 @@ class _MusicPage(QWidget):
     """Shared scaffolding: tinted scroll page, back button, play/shuffle."""
 
     back_requested = Signal()
+    # "Added to Road trip." for the top bar. A playlist is added to from a song's
+    # menu on every one of these pages, and until this existed the click had
+    # nothing to show for itself: the list is not on screen, so the page looks
+    # exactly as it did.
+    status = Signal(str)
 
     def __init__(self, player, parent=None) -> None:
         super().__init__(parent)
@@ -98,7 +105,8 @@ class _MusicPage(QWidget):
     def _connect_list(self, tracks: TrackList) -> None:
         """The menu and the heart, the same on every list these pages build."""
         tracks.context_requested.connect(
-            lambda track, pos: track_menu(self, track, self._player).exec(pos))
+            lambda track, pos: track_menu(self, track, self._player,
+                                          on_playlist_change=self.status.emit).exec(pos))
         tracks.like_requested.connect(self._player.set_liked)
 
     def _own_rows(self) -> list[dict]:
@@ -413,3 +421,196 @@ class ArtistView(_MusicPage):
         self._play.setEnabled(ready > 0)
         self._shuffle.setEnabled(ready > 1)
         self._sync_current()
+
+
+class PlaylistView(_MusicPage):
+    """One music playlist, built on the same page as an album.
+
+    Everything an album page does it needs too — the tinted scroll, the back
+    button, Play and Shuffle over a track list, the hearts staying in step — so
+    it is ~110 lines rather than 300. What is different is that the order is the
+    user's, so each row's menu can move it, and the page reloads itself
+    afterwards: db.data_version deliberately does not report this process's own
+    writes, so nothing else is going to tell it.
+    """
+
+    def __init__(self, player, parent=None) -> None:
+        super().__init__(player, parent)
+        self._playlist_id: int | None = None
+        self._name = ""
+        self._rows: list[dict] = []
+
+        header = QHBoxLayout()
+        header.setSpacing(30)
+        self._cover = ArtView(240, 240, radius=8)
+        header.addWidget(self._cover, alignment=Qt.AlignmentFlag.AlignBottom)
+
+        info = QVBoxLayout()
+        info.setSpacing(6)
+        info.addStretch(1)
+        self._eyebrow = QLabel("PLAYLIST")
+        info.addWidget(self._eyebrow)
+        self._title = QLabel()
+        self._title.setWordWrap(True)
+        self._title.setStyleSheet(f"color: {C.TEXT}; font-size: 32pt; font-weight: 800;")
+        info.addWidget(self._title)
+        self._meta = QLabel()
+        self._meta.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10pt;")
+        info.addWidget(self._meta)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(11)
+        self._play, self._shuffle = self._buttons(actions)
+        self._play.clicked.connect(lambda: self._play_from(0))
+        self._shuffle.clicked.connect(self._shuffle_playlist)
+        # Inserted before the stretch _buttons leaves behind, so the four sit
+        # together: right-aligned they were 1400 px from Play on a wide window
+        # and read as belonging to something else.
+        for index, (label, slot) in enumerate((("Rename", self._rename),
+                                               ("Delete", self._delete))):
+            button = QPushButton(label)
+            button.setObjectName("Ghost")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(slot)
+            actions.insertWidget(2 + index, button)
+        info.addSpacing(14)
+        info.addLayout(actions)
+        header.addLayout(info, 1)
+        self.body.addLayout(header)
+        self.body.addSpacing(30)
+
+        self._tracks = TrackList(["number", "title", "artist", "album", "like", "time"],
+                                 auto_height=True, numbering="index")
+        self._tracks.play_requested.connect(self._play_from)
+        self._connect_list(self._tracks)
+        self.body.addWidget(self._tracks)
+
+        self._empty = QLabel(
+            "Nothing in this playlist yet.\n\nRight-click a song anywhere it is listed — "
+            "an album, an artist, Songs, Liked — and choose Add to playlist."
+        )
+        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty.setWordWrap(True)
+        self._empty.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11pt; padding: 40px;")
+        self.body.addWidget(self._empty)
+        self.body.addStretch(1)
+
+    @property
+    def playlist_id(self) -> int | None:
+        return self._playlist_id
+
+    def set_playlist(self, playlist_id: int) -> None:
+        self._playlist_id = int(playlist_id)
+        self.reload()
+        self._scroll.verticalScrollBar().setValue(0)
+
+    def _connect_list(self, tracks: TrackList) -> None:
+        # The shared song menu, plus the three things only a playlist page can
+        # offer: it is the only place that knows which entry a row is.
+        tracks.context_requested.connect(
+            lambda track, pos: track_menu(self, track, self._player, self._row_actions(track),
+                                          self._on_playlist_change).exec(pos))
+        tracks.like_requested.connect(self._player.set_liked)
+
+    def _on_playlist_change(self, message: str) -> None:
+        # This page is one of the lists that was just written to, so it reloads;
+        # the line still goes up, because the playlist added to may well be a
+        # different one and then nothing on screen moves.
+        self.reload()
+        self.status.emit(message)
+
+    def _row_actions(self, track: dict) -> list:
+        entry = track.get("entry_id")
+        if entry is None:
+            return []
+        return [("Move up", lambda: self._move(int(entry), -1)),
+                ("Move down", lambda: self._move(int(entry), 1)),
+                ("Remove from this playlist", lambda: self._remove(int(entry)))]
+
+    def _move(self, entry_id: int, step: int) -> None:
+        if self._playlist_id is not None and move_entry(
+                self._playlist_id, entry_id, step, [r["entry_id"] for r in self._rows]):
+            self.reload()
+
+    def _remove(self, entry_id: int) -> None:
+        if self._playlist_id is None:
+            return
+        db.remove_playlist_entries(self._playlist_id, [entry_id])
+        self.reload()
+
+    def _rename(self) -> None:
+        if self._playlist_id is None:
+            return
+        name = ask_name(self, "Rename playlist", "Name", self._name)
+        if name is None:
+            return
+        db.rename_playlist(self._playlist_id, name)
+        self.reload()
+
+    def _delete(self) -> None:
+        if self._playlist_id is None:
+            return
+        if not confirm_delete(self, self._name):
+            return
+        db.delete_playlist(self._playlist_id)
+        self._playlist_id = None
+        self.back_requested.emit()
+
+    def reload(self) -> None:
+        if self._playlist_id is None:
+            return
+        row = db.playlist(self._playlist_id)
+        if row is None:
+            # Deleted here or in another window: leave, the way an album page
+            # does when its album has gone. The id goes first, so whoever asked
+            # for the page can see it did not open — set_playlist's caller shows
+            # the page after it returns, and a page still holding the dead id
+            # looked like a live one.
+            self._playlist_id = None
+            self.back_requested.emit()
+            return
+        self._name = row["name"] or "Untitled"
+        self._rows = library.playlist_tracks(self._playlist_id)
+
+        first = next((r for r in self._rows if r.get("cover")), None)
+        colours = library.parse_palette(first.get("palette") if first else None)
+        self._page.set_colours(colours)
+        self._tracks.set_accent(colours["accent"])
+        self._eyebrow.setStyleSheet(
+            f"color: {colours['accent']}; font-size: 9pt; font-weight: 800; letter-spacing: 1.5px;")
+        self._cover.set_art(first.get("cover") if first else None, self._name)
+        self._title.setText(display_name(self._name))
+        self._title.setToolTip(self._name)
+
+        count = len(self._rows)
+        held = int(row["item_count"] or 0)
+        bits = [f"{count} song{'s' if count != 1 else ''}"]
+        length = fmt_duration(sum(float(r.get("duration") or 0) for r in self._rows))
+        if length:
+            bits.append(length)
+        if held > count:
+            # Said out loud rather than shown as a shorter list: an unplugged
+            # drive is back tomorrow, and the entries are still in the playlist.
+            bits.append(f"{held - count} not available right now")
+        self._meta.setText("  ·  ".join(bits))
+
+        self._tracks.set_tracks(self._rows)
+        self._tracks.setVisible(bool(self._rows))
+        self._empty.setVisible(not self._rows)
+        self._play.setEnabled(count > 0)
+        self._shuffle.setEnabled(count > 1)
+        self._sync_current()
+
+    def _own_rows(self) -> list[dict]:
+        return self._rows
+
+    def _context(self) -> dict:
+        return {"kind": "playlist", "title": self._name, "id": self._playlist_id}
+
+    def _play_from(self, row: int) -> None:
+        if self._rows:
+            self._player.play_tracks(self._rows, row, in_order=True, context=self._context())
+
+    def _shuffle_playlist(self) -> None:
+        if self._rows:
+            self._player.shuffle_tracks(self._rows, context=self._context())

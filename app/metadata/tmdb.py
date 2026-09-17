@@ -12,7 +12,7 @@ from pathlib import Path
 
 import requests
 
-from .. import db
+from .. import __version__, db
 from ..config import art_dir
 
 API_BASE = "https://api.themoviedb.org/3"
@@ -55,7 +55,7 @@ class TmdbClient:
         self.api_key = (api_key or "").strip()
         self.language = language or "en-US"
         self._session = requests.Session()
-        self._session.headers.update({"User-Agent": "Mistery/1.0"})
+        self._session.headers.update({"User-Agent": f"Mistery/{__version__}"})
 
     @property
     def enabled(self) -> bool:

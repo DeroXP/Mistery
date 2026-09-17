@@ -79,6 +79,7 @@ qInstallMessageHandler(
 from app import db, vr                                         # noqa: E402
 from app.config import settings                                # noqa: E402
 from app.models import MediaItem, ShowItem                     # noqa: E402
+from app.ui import main_window                                 # noqa: E402
 from app.ui.main_window import MainWindow                      # noqa: E402
 from app.ui.widgets.icons import IconButton                    # noqa: E402
 from app.util import fmt_clock                                 # noqa: E402
@@ -207,7 +208,7 @@ def _music_checks(window, pump) -> None:
     settings.set("music_repeat", "off")
     music = window.music
     try:
-        window._on_nav(3)
+        window._on_nav(main_window._NAV_MUSIC)
         pump(1.2)
         cards = window.music_page._album_flow.count()
         ok("Music page lists albums", window.stack.currentWidget() is window.music_page and cards > 0,
@@ -422,10 +423,21 @@ def main() -> int:
     pump(2.0)
 
     print("-- navigation --")
-    for index, name in enumerate(["Home", "Movies", "Shows", "Music", "Search", "Settings"]):
+    # The nav's own list, not a copy of it: a page added in the middle used to
+    # shift every index after it, and a copy here would have agreed with itself.
+    # Which page it landed on, not just that something is on screen: "renders"
+    # was true of whatever _on_nav chose, so the parallel list in _on_nav could
+    # drift from _NAV — the exact failure the comment there warns about — and
+    # this loop would still pass with Playlists showing Search.
+    expected = {"Home": window.home, "Movies": window.movies, "Shows": window.shows,
+                "Music": window.music_page, "Playlists": window.playlists_page,
+                "Search": window.search, "Settings": window.settings_page}
+    for index, (_icon, name) in enumerate(main_window._NAV):
         window._on_nav(index)
         pump(0.45)
-        ok(f"{name} renders", window.stack.currentWidget().isVisible())
+        page = window.stack.currentWidget()
+        ok(f"{name} opens the {name} page", page is expected.get(name) and page.isVisible(),
+           type(page).__name__)
 
     shows = db.all_shows()
     if shows:
@@ -719,7 +731,7 @@ def main() -> int:
     _music_checks(window, pump)
 
     print("\n-- search --")
-    window._on_nav(4)
+    window._on_nav(main_window._NAV_SEARCH)
     ok("the search tab opens search, not a neighbour",
        window.stack.currentWidget() is window.search)
     window.search._search.setText("100%")

@@ -34,7 +34,9 @@ _log = logging.getLogger("music")
 _STAMP_RE = re.compile(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
 _OFFSET_RE = re.compile(r"\[offset:\s*([+-]?\d+)\s*\]", re.IGNORECASE)
 _RETRY_NONE_AFTER = 7 * 24 * 3600
-_USER_AGENT = "Mistery/1.0 (local music player)"
+from .. import __version__
+
+_USER_AGENT = f"Mistery/{__version__} (local music player)"
 
 # LRCLIB answers in well under a second when it is up. On a network that takes
 # connections and never replies (a captive portal, stalled Wi-Fi, an outage)

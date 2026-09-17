@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .. import db, vr
+from .. import __version__, db, vr
 from ..discord_presence import DiscordPresence
 from ..config import find_ffmpeg, find_ffprobe, find_mpv, settings
 from ..metadata.tmdb import TmdbClient
@@ -23,6 +23,16 @@ from ..music import audio_fx, library as music_library, loudness
 from ..player.mpv_process import quality_preset
 from ..util import fmt_duration, fmt_size, reveal_in_explorer
 from .theme import C
+
+
+def _saver_after() -> int:
+    """The idle delay, clamped to what the spin box can hold. settings.json is
+    a file a person can edit, and ScreensaverView floors it at 10 s anyway."""
+    try:
+        value = int(settings.get("music_screensaver_after", 180) or 180)
+    except (TypeError, ValueError):
+        value = 180
+    return max(10, min(3600, value))
 
 
 def _section(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
@@ -372,6 +382,43 @@ class SettingsView(QWidget):
         self._lyrics_online.toggled.connect(lambda v: settings.set("fetch_lyrics", v))
         layout.addWidget(self._lyrics_online)
 
+        # The screensaver takes over the whole screen, is on by default and
+        # arrives three minutes after you last touched anything, so it needs an
+        # off switch somewhere a person can find. Until this row existed the
+        # only way to stop it was to edit settings.json.
+        self._screensaver = QCheckBox(
+            "Let Now Playing take over the screen while a song plays"
+        )
+        self._screensaver.setChecked(bool(settings.get("music_screensaver", True)))
+        self._screensaver.toggled.connect(self._on_screensaver_toggled)
+        layout.addWidget(self._screensaver)
+
+        saver_row = QHBoxLayout()
+        saver_row.setSpacing(10)
+        saver_after_caption = QLabel("After")
+        saver_after_caption.setMinimumWidth(150)
+        saver_row.addWidget(saver_after_caption)
+        self._screensaver_after = QSpinBox()
+        self._screensaver_after.setRange(10, 3600)
+        self._screensaver_after.setSingleStep(30)
+        self._screensaver_after.setSuffix(" s of stillness")
+        self._screensaver_after.setValue(_saver_after())
+        self._screensaver_after.valueChanged.connect(
+            lambda v: settings.set("music_screensaver_after", v))
+        self._screensaver_after.setEnabled(self._screensaver.isChecked())
+        saver_row.addWidget(self._screensaver_after)
+        saver_row.addStretch(1)
+        layout.addLayout(saver_row)
+        saver_note = QLabel(
+            "The record, the words and the song's own shape on black, drifting and "
+            "dimming as the hours pass. F11 starts it at once, and it ends when you "
+            "actually move the mouse. With this off nothing takes over the screen, and "
+            "songs are not measured in the background for the waveform either."
+        )
+        saver_note.setObjectName("Faint")
+        saver_note.setWordWrap(True)
+        layout.addWidget(saver_note)
+
         self._close_to_tray = QCheckBox(
             "Keep playing in the system tray when I close the window"
         )
@@ -424,6 +471,10 @@ class SettingsView(QWidget):
         layout.addLayout(cover_row)
         return card
 
+    def _on_screensaver_toggled(self, on: bool) -> None:
+        settings.set("music_screensaver", bool(on))
+        self._screensaver_after.setEnabled(bool(on))
+
     def _select_cover_style(self) -> None:
         index = self._cover_style.findData(str(settings.get("music_cover_style", "disc")))
         self._cover_style.blockSignals(True)
@@ -440,6 +491,13 @@ class SettingsView(QWidget):
         self._resume.blockSignals(True)
         self._resume.setChecked(bool(settings.get("music_resume", True)))
         self._resume.blockSignals(False)
+        self._screensaver.blockSignals(True)
+        self._screensaver.setChecked(bool(settings.get("music_screensaver", True)))
+        self._screensaver.blockSignals(False)
+        self._screensaver_after.blockSignals(True)
+        self._screensaver_after.setValue(_saver_after())
+        self._screensaver_after.blockSignals(False)
+        self._screensaver_after.setEnabled(self._screensaver.isChecked())
 
     # --- sound --------------------------------------------------------------
 
@@ -969,6 +1027,7 @@ class SettingsView(QWidget):
             )
         self._about.setText(
             f"<div style='line-height:170%'>"
+            f"<b>Mistery {__version__}</b><br>"
             f"{stats['movies']} movies · {stats['shows']} shows · "
             f"{stats['files']} files · {fmt_size(stats['bytes'])} · "
             f"{fmt_duration(stats['seconds'])} of runtime{incomplete}<br>"

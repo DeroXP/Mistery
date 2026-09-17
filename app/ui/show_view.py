@@ -8,11 +8,13 @@ from PySide6.QtWidgets import (
 )
 
 from .. import db
+from ..metadata import categories as cat
 from ..models import MediaItem, ShowItem
 from ..util import elide, fmt_duration
 from .detail_view import _Backdrop
 from .theme import C
 from .widgets.artview import ArtView
+from .widgets.chips import CategoryEditor
 from .widgets.icons import IconButton
 from .widgets.rows import CardGrid
 
@@ -80,6 +82,11 @@ class ShowView(QWidget):
         self._meta.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10.5pt;")
         info.addSpacing(8)
         info.addWidget(self._meta)
+
+        self._categories = CategoryEditor()
+        self._categories.changed.connect(self._on_categories_changed)
+        info.addSpacing(2)
+        info.addWidget(self._categories)
 
         self._overview = QLabel()
         self._overview.setWordWrap(True)
@@ -154,9 +161,10 @@ class ShowView(QWidget):
         total = sum(e.duration or 0 for e in self._episodes)
         if total:
             meta_bits.append(fmt_duration(total) + " total")
-        if show.genres:
-            meta_bits.append(show.genres)
         self._meta.setText("   ·   ".join(meta_bits))
+
+        # Genres were plain text on this line; they are now the editor below it.
+        self._categories.set_row(show.genres, fresh["user_genres"] if fresh else None)
 
         self._overview.setText(elide(show.overview or "", 260))
         self._overview.setVisible(bool(show.overview))
@@ -187,6 +195,11 @@ class ShowView(QWidget):
         self._play.setVisible(next_up is not None)
 
         self._render_episodes()
+
+    def _on_categories_changed(self, names: list) -> None:
+        """Written to user_genres, which the metadata pass never touches."""
+        if self._show.id:
+            db.update_show(self._show.id, user_genres=cat.join(names))
 
     def show_season(self, season: int | None) -> None:
         """Turn to a season if the show has it: the one the player was last in,

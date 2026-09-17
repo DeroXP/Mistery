@@ -16,6 +16,7 @@ from ...metadata import thumbs as thumbs_module
 from ...models import MediaItem, ShowItem
 from ...util import elide, fmt_duration, fmt_remaining
 from ..theme import POSTER_H, POSTER_W, RADIUS, WIDE_H, WIDE_W, C
+from .flow import FlowLayout
 from .icons import paint_icon
 
 _TITLE_BLOCK = 56
@@ -36,7 +37,8 @@ _REST_INSET = 8.0
 class _BaseCard(QWidget):
     clicked = Signal(object)
     play_requested = Signal(object)
-    # "play" | "vr" | "details" | "watched" | "folder"
+    # "play" | "vr" | "details" | "watched" | "folder" | "playlist", plus
+    # whatever extra_actions carries ("up" | "down" | "unlist" on a playlist).
     action_requested = Signal(str, object)
 
     ART_W = POSTER_W
@@ -47,6 +49,10 @@ class _BaseCard(QWidget):
         self._item = item
         self._pixmap: QPixmap | None = None
         self._hover = 0.0
+        # (label, action) pairs the page underneath wants in this card's menu.
+        # A card still knows nothing about the database: it emits the action and
+        # the page does the work, the same as every other entry here.
+        self.extra_actions: list[tuple[str, str]] = []
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         self.setFixedSize(QSize(self.ART_W, self.ART_H + _TITLE_BLOCK))
@@ -245,6 +251,10 @@ class _BaseCard(QWidget):
         )
         if is_media:
             menu.addAction(
+                "Add to playlist…",
+                lambda: self.action_requested.emit("playlist", item),
+            )
+            menu.addAction(
                 "Mark unwatched" if item.watched else "Mark watched",
                 lambda: self.action_requested.emit("watched", item),
             )
@@ -252,6 +262,10 @@ class _BaseCard(QWidget):
                 "Open file location",
                 lambda: self.action_requested.emit("folder", item),
             )
+        if self.extra_actions:
+            menu.addSeparator()
+            for label, action in self.extra_actions:
+                menu.addAction(label, lambda a=action: self.action_requested.emit(a, item))
         menu.exec(event.globalPos())
 
     # --- painting helpers ---------------------------------------------------
@@ -436,6 +450,29 @@ class ShowCard(PosterCard):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
+
+
+def card_flow(container):
+    """The wrapping layout a CardGrid lays its cards out in, or None.
+
+    Same reason as set_extra_actions below: the grid builds and owns its cards,
+    and a playlist page wants to move one of them without rebuilding all of
+    them. Asked for by type rather than reached for by name, so a grid that
+    changes how it is put together says None here instead of lying.
+    """
+    return container.findChild(FlowLayout)
+
+
+def set_extra_actions(container, actions: list[tuple[str, str]]) -> None:
+    """Give every card inside `container` some page-specific menu entries.
+
+    Set after a grid has been filled, because the grid builds its own cards
+    (rows.CardGrid): a playlist page wants Move up / Move down / Remove on each
+    card, and no other page wants anything. Cards with nothing extra show
+    exactly the menu they always did.
+    """
+    for card in container.findChildren(_BaseCard):
+        card.extra_actions = list(actions)
 
 
 def make_card(item, wide: bool = False) -> _BaseCard:

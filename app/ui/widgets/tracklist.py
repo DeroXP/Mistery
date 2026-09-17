@@ -400,9 +400,20 @@ class TrackList(QTableView):
         return hint
 
 
-def track_menu(parent, track: dict, player, extra: list | None = None) -> QMenu:
-    """Play next / Add to queue / Like / Show in folder — the same everywhere."""
+def track_menu(parent, track: dict, player, extra: list | None = None,
+               on_playlist_change=None) -> QMenu:
+    """Play next / Add to queue / Like / Add to playlist / Show in folder — the
+    same everywhere.
+
+    `extra` is for the page underneath: Move up, Move down and Remove from this
+    playlist only make sense on a playlist page, and only it knows which entry
+    the row is. `on_playlist_change` is called with a line of text after a
+    playlist has been added to or taken from, so that page can reload itself —
+    db.data_version deliberately does not report our own writes, so nothing
+    else will tell it.
+    """
     from ...util import reveal_in_explorer
+    from .playlist_menu import add_to_playlist_menu
 
     menu = QMenu(parent)
     # Callers exec() it and drop it, and its parent is a page that lives for
@@ -419,6 +430,12 @@ def track_menu(parent, track: dict, player, extra: list | None = None) -> QMenu:
     like = menu.addAction("Remove from Liked Songs" if liked else "Save to Liked Songs",
                           lambda: player.set_liked(track, not liked))
     like.setEnabled(ready or liked)
+    if track.get("id") is not None:
+        # Parented to this menu so it goes when it does (see WA_DeleteOnClose
+        # above); a submenu parented to the page outlived every right-click.
+        playlists = add_to_playlist_menu(menu, "music", [int(track["id"])], on_playlist_change)
+        playlists.setEnabled(ready)
+        menu.addMenu(playlists)
     for label, callback in extra or []:
         menu.addAction(label, callback)
     menu.addSeparator()

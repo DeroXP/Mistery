@@ -1,4 +1,4 @@
-"""Music: the library page — Albums, Artists, Songs and Liked songs."""
+"""Music: the library page — Albums, Artists, Songs, Liked songs and Playlists."""
 
 from __future__ import annotations
 
@@ -9,16 +9,24 @@ from PySide6.QtWidgets import (
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from .. import db
 from ..music import library
 from ..util import fmt_duration
+from .album_view import PlaylistView
 from .theme import C
 from .widgets.flow import FlowLayout
 from .widgets.icons import icon_pixmap
-from .widgets.music_cards import AlbumCard, ArtistCard, album_tile, artist_tile, play_tile
+from .widgets.music_cards import (
+    AlbumCard, ArtistCard, album_tile, artist_tile, play_tile, playlist_tile,
+)
+from .widgets.playlist_menu import ask_name, confirm_delete, new_playlist_with
 from .widgets.tracklist import TrackList, track_menu
 
-TABS = ("albums", "artists", "songs", "liked")
-_TAB_LABELS = ("Albums", "Artists", "Songs", "Liked")
+# The two must stay the same length and in the same order as the chips built
+# from _TAB_LABELS: current_tab indexes one by the button id, show_tab the other
+# by name.
+TABS = ("albums", "artists", "songs", "liked", "playlists")
+_TAB_LABELS = ("Albums", "Artists", "Songs", "Liked", "Playlists")
 
 LIKED_CONTEXT = {"kind": "liked", "title": "Liked Songs", "id": None}
 SONGS_CONTEXT = {"kind": "songs", "title": "All songs", "id": None}
@@ -51,11 +59,28 @@ def _scroll(inner: QWidget) -> QScrollArea:
 class MusicView(QWidget):
     album_opened = Signal(int)
     artist_opened = Signal(str)
+    # A line for the top bar — "Added to Road trip." Adding a song to a playlist
+    # from Songs or Liked changes nothing you can see on this page, so without
+    # this the click looked like it had missed.
+    status = Signal(str)
 
     def __init__(self, player, parent=None) -> None:
         super().__init__(parent)
         self._player = player
-        root = QVBoxLayout(self)
+        self._open_playlist: int | None = None
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        # Two levels in one page: the tabs, and one playlist opened from them.
+        # The playlist page paints a tint from edge to edge, so the page margins
+        # live on the browse side rather than out here — nested inside them the
+        # band was inset by 52 px and read as a floating card.
+        self._level = QStackedWidget()
+        outer.addWidget(self._level)
+
+        self._browse = QWidget()
+        self._level.addWidget(self._browse)
+        root = QVBoxLayout(self._browse)
         root.setContentsMargins(52, 30, 52, 0)
         root.setSpacing(16)
 
@@ -132,6 +157,9 @@ class MusicView(QWidget):
         self._liked_page = self._build_liked()
         self._pages.addWidget(self._liked_page)
 
+        self._playlists_tab = self._build_playlists()
+        self._pages.addWidget(self._playlists_tab)
+
         self._empty = QLabel(
             "No music yet.\n\nAlbums in your library folders appear here. Anything still "
             "downloading shows up the moment it finishes — no rescan needed."
@@ -141,9 +169,63 @@ class MusicView(QWidget):
         self._empty.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11pt;")
         self._pages.addWidget(self._empty)
 
+        # The playlist a tile opens, over the whole page. It keeps itself in
+        # step with the player (it is a _MusicPage), so nothing here does.
+        self._playlist_page = PlaylistView(player)
+        self._playlist_page.back_requested.connect(self._close_playlist)
+        self._playlist_page.status.connect(self.status)
+        self._level.addWidget(self._playlist_page)
+
         player.track_changed.connect(lambda _t: self._sync_current())
         player.state_changed.connect(self._sync_current)
         player.track_updated.connect(self._on_track_updated)
+
+    def _build_playlists(self) -> QWidget:
+        """The Playlists tab: album-shaped tiles, and one button to start a list."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 6, 0, 0)
+        layout.setSpacing(0)
+
+        header = QHBoxLayout()
+        new = QPushButton("New playlist")
+        new.setObjectName("Ghost")
+        new.setCursor(Qt.CursorShape.PointingHandCursor)
+        new.clicked.connect(self._new_playlist)
+        header.addWidget(new)
+        header.addSpacing(8)
+        self._playlists_meta = QLabel()
+        self._playlists_meta.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10pt;")
+        header.addWidget(self._playlists_meta)
+        header.addStretch(1)
+        layout.addLayout(header)
+        layout.addSpacing(14)
+
+        self._playlists_stack = QStackedWidget()
+        holder = QWidget()
+        self._playlist_flow = FlowLayout(holder, margin=0, h_spacing=14, v_spacing=18)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 40)
+        inner_layout.addWidget(holder)
+        inner_layout.addStretch(1)
+        self._playlists_stack.addWidget(_scroll(inner))
+
+        # Not "in Up next": the queue's rows have a menu of their own (Play now,
+        # Remove from queue) and never build track_menu. Save as playlist, over
+        # the whole queue, is what that page offers instead — so it is named.
+        empty = QLabel(
+            "No playlists yet.\n\nRight-click any song — on an album, in Songs or in "
+            "Liked — and choose Add to playlist › New playlist.\n\n"
+            "Or keep what you are listening to: Up next › Save as playlist."
+        )
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setWordWrap(True)
+        empty.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11pt;")
+        self._playlists_stack.addWidget(empty)
+        self._playlists_empty = empty
+        layout.addWidget(self._playlists_stack, 1)
+        return page
 
     def _build_liked(self) -> QWidget:
         """Liked songs: Play and Shuffle over the list, newest like first."""
@@ -210,8 +292,18 @@ class MusicView(QWidget):
 
     def _connect_list(self, tracks: TrackList) -> None:
         tracks.context_requested.connect(
-            lambda track, pos: track_menu(self, track, self._player).exec(pos))
+            lambda track, pos: track_menu(self, track, self._player,
+                                          on_playlist_change=self._on_added).exec(pos))
         tracks.like_requested.connect(self._player.set_liked)
+
+    def _on_added(self, message: str) -> None:
+        """A song went into (or came out of) a playlist from one of these lists.
+
+        The Playlists tab behind is stale now — db.data_version does not report
+        this process's own writes — but it is not the tab you are on, and _on_tab
+        reloads it when you get there. So: say so, and leave the tiles.
+        """
+        self.status.emit(message)
 
     # --- data ---------------------------------------------------------------
 
@@ -227,12 +319,51 @@ class MusicView(QWidget):
         """
         index = TABS.index(name) if name in TABS else 0
         self._tabs.button(index).setChecked(True)
+        # Asking for a tab is asking for the tabs: "Playing from Liked Songs"
+        # clicked while a playlist page was open used to move the chip behind it
+        # and leave the playlist on screen.
+        self._open_playlist = None
+        self._level.setCurrentWidget(self._browse)
         if search is not None and search != self._search.text():
             self._search.blockSignals(True)
             self._search.setText(search)
             self._search.blockSignals(False)
 
+    def show_playlist(self, playlist_id: int) -> None:
+        """Open one music playlist over the whole page.
+
+        Called before the page is shown, so the window's _go reloads it into
+        place — that is what "Playing from PLAYLIST" does.
+        """
+        self._open_playlist = int(playlist_id)
+        self._tabs.button(TABS.index("playlists")).setChecked(True)
+        self._playlist_page.set_playlist(self._open_playlist)
+        # set_playlist reloads, and a playlist that has gone since asks to go
+        # back from inside that reload — which has already put the tabs on
+        # screen and cleared _open_playlist. Showing the page anyway left a
+        # working page for a list that no longer exists: right title, right
+        # rows, Play enabled, and nothing afterwards to take it down.
+        if self._open_playlist is None or self._playlist_page.playlist_id is None:
+            return
+        self._level.setCurrentWidget(self._playlist_page)
+
+    @property
+    def open_playlist(self) -> int | None:
+        return self._open_playlist
+
+    def _close_playlist(self) -> None:
+        # The reload is the point: the list may have been renamed, reordered,
+        # emptied or deleted from the page above, and nothing else will tell the
+        # tiles — db.data_version deliberately does not report this process's
+        # own writes.
+        self._open_playlist = None
+        self._level.setCurrentWidget(self._browse)
+        self.reload()
+
     def reload(self) -> None:
+        if self._open_playlist is not None:
+            self._playlist_page.reload()
+            return
         text = self._search.text().strip().lower()
         tab = self._tabs.checkedId()
         self._sort.setVisible(tab == 0)
@@ -264,9 +395,41 @@ class MusicView(QWidget):
             self._songs.set_tracks(rows)
             self._pages.setCurrentWidget(self._songs)
             self._sync_current()
+        elif tab == 4:
+            self._reload_playlists()
+            self._pages.setCurrentWidget(self._playlists_tab)
         else:
             self._reload_liked()
             self._pages.setCurrentWidget(self._liked_page)
+
+    def _reload_playlists(self) -> None:
+        text = self._search.text().strip().lower()
+        rows = [dict(r) for r in db.playlists("music")]
+        total = len(rows)
+        if text:
+            rows = [r for r in rows if text in (r.get("name") or "").lower()]
+        covers = library.playlist_covers(int(r["id"]) for r in rows)
+        self._fill(self._playlist_flow,
+                   [playlist_tile(r, covers.get(int(r["id"]))) for r in rows], AlbumCard)
+        songs = sum(int(r.get("item_count") or 0) for r in rows)
+        self._playlists_meta.setText(
+            f"{len(rows)} of {total} playlists" if text and rows else
+            f"{len(rows)} playlist{'s' if len(rows) != 1 else ''}  ·  "
+            f"{songs} song{'s' if songs != 1 else ''}" if rows else "")
+        if rows:
+            self._playlists_stack.setCurrentIndex(0)
+        else:
+            self._playlists_empty.setText(
+                f"No playlists match “{self._search.text().strip()}”" if total else
+                "No playlists yet.\n\nRight-click any song — on an album, in Songs or in "
+                "Liked — and choose Add to playlist › New playlist.\n\n"
+                "Or keep what you are listening to: Up next › Save as playlist.")
+            self._playlists_stack.setCurrentWidget(self._playlists_empty)
+
+    def _new_playlist(self) -> None:
+        playlist_id = new_playlist_with(self, "music", [])
+        if playlist_id is not None:
+            self.show_playlist(playlist_id)
 
     def _reload_liked(self, keep_scroll: bool = False) -> None:
         text = self._search.text().strip()
@@ -346,12 +509,25 @@ class MusicView(QWidget):
     def _open(self, tile) -> None:
         if tile.kind == "album":
             self.album_opened.emit(int(tile.key))
+        elif tile.kind == "playlist":
+            self.show_playlist(int(tile.key))
         else:
             self.artist_opened.emit(str(tile.key))
 
     def _act(self, action: str, tile) -> None:
         if action == "open":
             self._open(tile)
+            return
+        if action == "rename":
+            name = ask_name(self, "Rename playlist", "Name", tile.title)
+            if name is not None:
+                db.rename_playlist(int(tile.key), name)
+                self.reload()
+            return
+        if action == "delete":
+            if confirm_delete(self, tile.title):
+                db.delete_playlist(int(tile.key))
+                self.reload()
             return
         play_tile(self._player, action, tile)
 

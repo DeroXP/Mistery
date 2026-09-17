@@ -13,10 +13,12 @@ from PySide6.QtWidgets import (
 
 from .. import db, vr
 from ..images import load_async
+from ..metadata import categories as cat
 from ..models import MediaItem
 from ..util import elide, fmt_clock, fmt_duration, fmt_size, reveal_in_explorer
 from .theme import C
 from .widgets.artview import ArtView
+from .widgets.chips import CategoryEditor
 from .widgets.flow import FlowLayout
 from .widgets.icons import IconButton
 
@@ -153,6 +155,15 @@ class DetailView(QWidget):
         info.addSpacing(8)
         info.addWidget(self._meta)
 
+        self._categories = CategoryEditor()
+        self._categories.changed.connect(self._on_categories_changed)
+        # Only once the popover closes: media_changed reloads this very page
+        # (main_window.reload_all), which would rebuild the editor under the
+        # hand that is still ticking chips.
+        self._categories.closed.connect(self.media_changed.emit)
+        info.addSpacing(4)
+        info.addWidget(self._categories)
+
         self._badges = QHBoxLayout()
         self._badges.setSpacing(7)
         self._badges.setContentsMargins(0, 0, 0, 0)
@@ -267,11 +278,18 @@ class DetailView(QWidget):
             meta_bits.append(fmt_duration(item.duration))
         if item.rating:
             meta_bits.append(f"★ {item.rating:.1f}")
-        if item.genres:
-            meta_bits.append(item.genres)
         if item.edition:
             meta_bits.append(item.edition)
         self._meta.setText("   ·   ".join(meta_bits))
+
+        # Genres used to sit in the line above as plain text. Episodes never
+        # have any — the series owns them — so the editor is only for films.
+        self._categories.setVisible(not item.is_episode)
+        if not item.is_episode:
+            self._categories.set_row(
+                fresh["genres"] if fresh else item.genres,
+                fresh["user_genres"] if fresh else None,
+            )
 
         while self._badges.count():
             widget = self._badges.takeAt(0).widget()
@@ -364,6 +382,11 @@ class DetailView(QWidget):
 
     def _on_play(self) -> None:
         self.play_requested.emit(self._item, self._item.resume_position)
+
+    def _on_categories_changed(self, names: list) -> None:
+        """Written to user_genres, which the metadata pass never touches."""
+        if self._item.id:
+            db.update_media(self._item.id, user_genres=cat.join(names))
 
     def _toggle_watched(self) -> None:
         db.set_watched(self._item.id, not self._item.watched)

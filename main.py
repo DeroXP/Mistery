@@ -58,6 +58,26 @@ def _write_lock() -> None:
         pass
 
 
+def _note_quit() -> None:
+    """Write down that Mistery has stopped, for the updater.
+
+    The updater only replaces files when nothing has run for half an hour, and
+    the lock file is deleted on the way out, so it cannot answer "how long".
+    A crash or End Task skips this, which is why the updater treats a missing
+    or stale record as "wait another round" rather than "safe to go".
+    """
+    import json
+
+    from app import __version__
+    from app.config import data_dir
+
+    try:
+        (data_dir() / "last-run.json").write_text(
+            json.dumps({"quit": time.time(), "version": __version__}), encoding="utf-8")
+    except OSError:
+        pass            # a read-only or full disk is not worth failing a quit over
+
+
 def _clear_lock() -> None:
     """Remove app.lock if it is still ours. A lock another launch has written
     since belongs to a Mistery that is still running, and deleting it told
@@ -412,6 +432,7 @@ def main() -> int:
     # film's position went unsaved and mpv was killed rather than stopped.
     # _shutdown runs once; a quit from the window or the tray has already run it.
     app.aboutToQuit.connect(window._shutdown)
+    app.aboutToQuit.connect(_note_quit)
     app.aboutToQuit.connect(_clear_lock)
     _listen_for_other_instances(window)
     # Windows signing out or shutting down must never meet a close that goes to

@@ -18,7 +18,7 @@ from PySide6.QtGui import (
     QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QSlider,
+    QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy,
     QVBoxLayout, QWidget,
 )
 
@@ -27,6 +27,7 @@ from ..metadata import thumbs as thumbs_module
 from ..util import elide, fmt_clock
 from .theme import C
 from .widgets.icons import IconButton
+from .widgets.volume_bar import FINE_STEP, WHEEL_STEP, VolumeBar
 
 _HIDE_DELAY_MS = 2800
 _TRACK_HEIGHT = 5.0
@@ -589,22 +590,11 @@ class PlayerOverlay(QWidget):
         self._volume_button.clicked.connect(self.mute_toggled.emit)
         controls.addWidget(self._volume_button)
 
-        self._volume = QSlider(Qt.Orientation.Horizontal)
         # The same ceiling as mpv's --volume-max and the arrow keys. At 130 the
-        # slider clipped a key-set 150, and the next wheel step dropped it to 130.
-        self._volume.setRange(0, 150)
+        # bar clipped a key-set 150, and the next wheel step dropped it to 130.
+        self._volume = VolumeBar(0, 150)
         self._volume.setFixedWidth(112)
-        self._volume.setStyleSheet(f"""
-            QSlider::groove:horizontal {{
-                height: 4px; border-radius: 2px; background: rgba(255,255,255,0.28);
-            }}
-            QSlider::sub-page:horizontal {{ background: {C.TEXT}; border-radius: 2px; }}
-            QSlider::handle:horizontal {{
-                background: {C.TEXT}; width: 12px; height: 12px;
-                margin: -4px 0; border-radius: 6px;
-            }}
-        """)
-        self._volume.valueChanged.connect(self.volume_changed.emit)
+        self._volume.value_changed.connect(self.volume_changed.emit)
         controls.addWidget(self._volume)
 
         controls.addStretch(1)
@@ -729,6 +719,11 @@ class PlayerOverlay(QWidget):
         if self.seek_bar.is_dragging or self.seek_bar.underMouse():
             self._hide_timer.start()
             return
+        # A volume drag can leave the bottom bar and keep going (the mouse is
+        # grabbed); hiding the chrome under it would take the bar away mid-drag.
+        if self._volume.is_dragging:
+            self._hide_timer.start()
+            return
         # Never pull the controls out from under a resting pointer.
         if self._top.underMouse() or self._bottom.underMouse():
             self._hide_timer.start()
@@ -779,9 +774,10 @@ class PlayerOverlay(QWidget):
         self._total.setText(fmt_clock(self._duration))
 
     def set_volume(self, volume: float, muted: bool) -> None:
-        self._volume.blockSignals(True)
-        self._volume.setValue(int(volume or 0))
-        self._volume.blockSignals(False)
+        self._volume.set_value(int(volume or 0))
+        # Muted is a state the bar shows (dimmed fill, crossed handle), not a
+        # level of zero: the fill still says what unmuting comes back to.
+        self._volume.set_muted(bool(muted))
         if muted or not volume:
             name = "mute"
         elif volume < 55:
@@ -816,7 +812,10 @@ class PlayerOverlay(QWidget):
         self._sub_button.setChecked(active)
 
     def set_episode_nav(self, is_episode: bool, has_prev: bool, has_next: bool) -> None:
-        """Show the episode buttons for shows, greyed out at either end of a run."""
+        """Show the previous/next buttons and the autoplay tick when there is
+        somewhere to go: the next episode of a show, or the next item of a
+        playlist. set_tv_state below is still about episodes only — a film has
+        no fingerprinted intro or credits behind that button."""
         for button, enabled in ((self._prev_episode, has_prev),
                                 (self._next_episode, has_next)):
             button.setVisible(is_episode)
@@ -1146,9 +1145,15 @@ class PlayerOverlay(QWidget):
         self.fullscreen_toggled.emit()
 
     def wheelEvent(self, event) -> None:
+        """The wheel anywhere on the picture is the volume — the same notch the
+        bar itself uses, so the step no longer changes as the pointer crosses
+        onto the bar (it was 5 over the picture and Qt's own 3 over the slider)."""
         self.wake()
-        step = 5 if event.angleDelta().y() > 0 else -5
-        self._volume.setValue(self._volume.value() + step)
+        delta = event.angleDelta().y()
+        if not delta:
+            return
+        step = FINE_STEP if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else WHEEL_STEP
+        self._volume.nudge(step if delta > 0 else -step)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)

@@ -68,6 +68,13 @@ _SLEEP_RESTORE_MS = 300
 # crash or a power cut loses at most that much of the position.
 _SESSION_DEBOUNCE_MS = 2000
 _SESSION_HEARTBEAT_MS = 15000
+
+# How long after the volume stops moving it is written down. settings.set
+# rewrites the whole of settings.json through a temp file (config.Settings'
+# docstring blames "every volume tick" for the torn files it once left behind),
+# and one drag of the bar used to be one write per step: 100 of them, measured,
+# on the GUI thread. mpv is still told at once — only the file waits.
+_VOLUME_SAVE_MS = 400
 # A restored session goes to a paused mpv this long after it is put back: out
 # of the way of the window's first paint, and still soon enough for a media key
 # pressed just after startup.
@@ -90,6 +97,12 @@ _RESTORE_END_MARGIN = 2.0
 
 class AudioMpv(MpvProcess):
     """mpv with no window, tuned for albums instead of films."""
+
+    # Music stops at 100; the film player goes to 150. It is --volume-max on
+    # the command line and the clamp in MpvProcess.set_volume, which every
+    # level goes through (_apply_volume): mpv clamps silently, and a clamp mpv
+    # made and we did not would desync the send-guard there.
+    volume_max = 100
 
     def observed_properties(self) -> list[str]:
         # eof-reached only changes at the end of a file; the sleep timer's
@@ -124,7 +137,10 @@ class AudioMpv(MpvProcess):
             "--replaygain=no",
             "--keep-open=no",
             f"--volume={int(settings.get('music_volume', 70))}",
-            "--volume-max=100",
+            # Muted from the first sample rather than a moment after it, so a
+            # start with mute on is never briefly heard.
+            f"--mute={'yes' if settings.get('music_muted', False) else 'no'}",
+            f"--volume-max={self.volume_max}",
             f"--audio-device={_device_setting()}",
             "--audio-client-name=Mistery",
             "--title=Mistery",
@@ -176,6 +192,7 @@ class MusicPlayer(QObject):
     queue_changed = Signal()
     sound_changed = Signal()       # volume matching or an effect changed
     volume_changed = Signal(int)
+    muted_changed = Signal(bool)          # mute is a state of its own, not a level of 0
     sleep_timer_changed = Signal()        # started, cancelled, fired or retargeted
     sleep_timer_fired = Signal()          # it ran out and the music was paused
     error = Signal(str)
@@ -243,6 +260,14 @@ class MusicPlayer(QObject):
         self._sleep_hold = False              # the timer ended the queue: its idle must not start it over
         self._fade = 1.0                      # share of the user's volume mpv is playing at
         self._sent_volume: float | None = None
+        # A level mpv already has and settings.json has not caught up with yet
+        # (see _VOLUME_SAVE_MS). While it is set it *is* the volume, so nothing
+        # in here reads a stale number out of the settings behind its back.
+        self._volume_pending: int | None = None
+        self._volume_save = QTimer(self)
+        self._volume_save.setSingleShot(True)
+        self._volume_save.setInterval(_VOLUME_SAVE_MS)
+        self._volume_save.timeout.connect(self._flush_volume)
         self._sleep_clock = QTimer(self)
         self._sleep_clock.setSingleShot(True)
         self._sleep_clock.setTimerType(Qt.TimerType.PreciseTimer)
@@ -423,6 +448,10 @@ class MusicPlayer(QObject):
             # even outlive a broken pipe, and a dropped handle to a live mpv is
             # a second song playing that nothing can pause.
             self._mpv.terminate()
+        # mpv reads the level off its command line, so the file has to be up to
+        # date before it is started or it would open at the old level and the
+        # send-guard below would believe the new one.
+        self._flush_volume()
         mpv = self._new_mpv()
         self._mpv = mpv
         try:
@@ -434,6 +463,7 @@ class MusicPlayer(QObject):
         self._sent_volume = float(self.volume)      # what --volume started it at
         if self._fade < 1.0:
             self._apply_volume()
+        self._apply_mute()              # --mute said the same; this covers a test or a stale mpv
         self._apply_power_mode()        # a restart while in the tray stays quiet
         return True
 
@@ -821,17 +851,64 @@ class MusicPlayer(QObject):
 
     def set_volume(self, value: int) -> None:
         value = max(0, min(100, int(value)))
-        changed = value != self.volume
-        settings.set("music_volume", value)
+        if value == self.volume:
+            # A bar re-emitting the level it already shows: two of them are
+            # built at every launch, and each used to rewrite settings.json for
+            # nothing before a note had played. Nothing to write down and
+            # nothing to announce — but still tell mpv, as the baseline did
+            # unconditionally. It is one line down the pipe, and it is the only
+            # thing that would put mpv right if a send had been lost out there.
+            self._sent_volume = None
+            self._apply_volume()
+            return
+        self._volume_pending = value
+        self._volume_save.start()
         self._sent_volume = None        # always tell mpv, as before
         self._apply_volume()
-        if changed:
-            # The bar and Now Playing each have a slider; without this the one
-            # not touched kept its old level, and nudging it jumped back to it.
-            self.volume_changed.emit(value)
+        # The bar and Now Playing each have one; without this the one not
+        # touched kept its old level, and nudging it jumped back to it.
+        self.volume_changed.emit(value)
+
+    def _flush_volume(self) -> None:
+        """Write the level down now: the debounce ran out, mpv is about to be
+        started from the setting, or Mistery is quitting. A change lost here
+        would be a worse bug than the writes the debounce saves."""
+        self._volume_save.stop()
+        pending, self._volume_pending = self._volume_pending, None
+        if pending is not None and pending != int(settings.get("music_volume", 70)):
+            settings.set("music_volume", pending)
+
+    @property
+    def muted(self) -> bool:
+        """Silent, but still at the level it was. Mute is mpv's own property,
+        not volume zero: volume zero forgets where the slider was, and the
+        sleep timer's fade is a multiplication of that same number."""
+        return bool(settings.get("music_muted", False))
+
+    def set_muted(self, muted: bool) -> None:
+        muted = bool(muted)
+        if muted != self.muted:
+            settings.set("music_muted", muted)
+        self._apply_mute()
+        # muted_changed only. state_changed means "what is playing changed":
+        # it saves the session, re-plans the sleep timer and republishes the
+        # Discord presence, and not one of its listeners reads the mute. Ctrl+M
+        # is a key you can hold down.
+        self.muted_changed.emit(muted)
+
+    def _apply_mute(self) -> None:
+        """mpv's own mute property, which is separate from its volume — so the
+        sleep timer's fade goes on multiplying the level underneath, and
+        unmuting mid-fade comes back at the level the fade has reached rather
+        than at full."""
+        mpv = self._mpv
+        if mpv is not None and mpv.is_running:
+            mpv.set_property("mute", self.muted)
 
     @property
     def volume(self) -> int:
+        if self._volume_pending is not None:
+            return self._volume_pending
         return int(settings.get("music_volume", 70))
 
     def _apply_volume(self) -> None:
@@ -846,8 +923,9 @@ class MusicPlayer(QObject):
             return
         value = round(self.volume * self._fade, 1)
         if value != self._sent_volume:
-            mpv.set_property("volume", value)
-            self._sent_volume = value
+            # Through set_volume, so the guard remembers what mpv was really
+            # given rather than what we asked for (AudioMpv stops at 100).
+            self._sent_volume = mpv.set_volume(value)
 
     # --- queue editing ----------------------------------------------------------
 
@@ -1452,6 +1530,7 @@ class MusicPlayer(QObject):
         if (not self._restored or self._closing or self.current is None or self._starting is not None
                 or (self._mpv is not None and self._mpv.is_running)):
             return
+        self._flush_volume()            # the thread reads --volume off the settings
         mpv = self._new_mpv()
         device = _device_setting()
         outcome: list[str] = []
@@ -1498,10 +1577,12 @@ class MusicPlayer(QObject):
             self._mpv.terminate()       # a dead one whose `exited` has not been handled yet
         self._mpv = mpv
         self._device_in_use = outcome[0]
-        # The volume and the device were read on the thread; either may have
-        # been changed since, and with no mpv then, only the setting changed.
+        # The volume, the mute and the device were read on the thread; any of
+        # them may have been changed since, and with no mpv then, only the
+        # setting changed.
         self._sent_volume = None
         self._apply_volume()
+        self._apply_mute()
         if _device_setting() != requested:
             self.set_audio_device(_device_setting())
         self._apply_power_mode()        # a preload while in the tray stays quiet
@@ -1828,6 +1909,7 @@ class MusicPlayer(QObject):
     def shutdown(self) -> None:
         if not self._closing:
             self.save_session()         # where the music was, for the next start
+        self._flush_volume()            # a level set in the last 400 ms is still only in mpv
         self._closing = True
         self._preload_timer.stop()
         starting, self._starting = self._starting, None
@@ -1838,6 +1920,7 @@ class MusicPlayer(QObject):
         self._position_poll.stop()
         self._sleep_clock.stop()
         self._volume_restore.stop()
+        self._volume_save.stop()
         self._session_debounce.stop()
         self._session_heartbeat.stop()
         if self._mpv is not None:

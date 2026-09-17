@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QIcon, QImage, QLinearGradient, QPainter, QPix
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from ...images import load_async
+from ...metadata import categories as cat
 from ...models import MediaItem
 from ...util import elide, fmt_clock, fmt_duration
 from ..theme import HERO_H, C, display_font, ui_font
@@ -100,8 +101,13 @@ class HeroBanner(QWidget):
             meta_bits.append(fmt_duration(item.duration))
         if item.rating:
             meta_bits.append(f"★ {item.rating:.1f}")
-        if item.genres:
-            meta_bits.append(item.genres.split(",")[0].strip())
+        # The one word the chips would use, not the one the service sent: this
+        # line said "Sci-Fi & Fantasy" on the same screen whose only chip for it
+        # reads Science Fiction. A hand-set category still can't show up here —
+        # MediaItem has no user_genres field to carry it.
+        first = cat.categories_of(item)[:1]
+        if first:
+            meta_bits.append(first[0])
         meta_bits.extend(item.badges[:3])
         self._meta.setText("   ·   ".join(b for b in meta_bits if b))
 

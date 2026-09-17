@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -9,8 +11,11 @@ from PySide6.QtWidgets import (
 )
 
 from .. import db
+from ..config import settings
+from ..metadata import categories as cat
 from ..models import MediaItem, ShowItem
 from .theme import C
+from .widgets.chips import CategoryFilter
 from .widgets.empty import EmptyState
 from .widgets.rows import CardGrid
 
@@ -67,6 +72,7 @@ class LibraryView(QWidget):
         super().__init__(parent)
         self._mode = mode
         self._items: list = []
+        self._categories: dict[int, frozenset[str]] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(52, 34, 52, 0)
@@ -103,10 +109,11 @@ class LibraryView(QWidget):
         self._filter_group.idToggled.connect(lambda _id, on: on and self._apply())
 
         controls.addSpacing(16)
-        self._genre = QComboBox()
-        self._genre.addItem("All genres")
-        self._genre.currentIndexChanged.connect(self._apply)
-        controls.addWidget(self._genre)
+        self._filter = CategoryFilter()
+        # Through the debounce, not straight to _apply: ticking three categories
+        # would otherwise rebuild every card in the grid three times.
+        self._filter.changed.connect(self._on_categories_changed)
+        controls.addWidget(self._filter)
 
         self._sort = QComboBox()
         self._sort.addItems([name for name, _ in _SORTS])
@@ -149,19 +156,35 @@ class LibraryView(QWidget):
 
     # --- state --------------------------------------------------------------
 
+    @property
+    def _settings_key(self) -> str:
+        return "show_categories" if self._mode == "shows" else "movie_categories"
+
     def set_mode(self, mode: str) -> None:
         self._mode = mode
         self._heading.setText(
             {"movies": "Movies", "shows": "Shows", "search": "Search"}.get(mode, "Library")
         )
         show_controls = mode != "search"
-        self._genre.setVisible(show_controls)
+        # The category button hides itself as well when the library has no
+        # categories at all — without a TMDB key that used to be every film, and
+        # a button opening an empty popover is worse than no button.
+        self._filter.setVisible(show_controls and self._filter.has_categories())
         self._sort.setVisible(show_controls)
         for button in self._filter_group.buttons():
             button.setVisible(show_controls)
+        if show_controls:
+            # "Any" is not remembered: it is the safe default and the one that
+            # never hides a title you expected to see.
+            self._filter.set_state(settings.get(self._settings_key) or [], "any")
         if mode == "search":
             self._search.setFocus()
         self._apply()
+
+    def _on_categories_changed(self) -> None:
+        if self._mode != "search":
+            settings.set(self._settings_key, self._filter.selected())
+        self._debounce.start()
 
     def _show_empty(self, empty: bool) -> None:
         """Swap the grid for a guidance panel when there is nothing to browse."""
@@ -188,26 +211,24 @@ class LibraryView(QWidget):
 
     def reload(self) -> None:
         if self._mode == "shows":
-            self._items = [ShowItem.from_row(r) for r in db.all_shows()]
+            rows = db.all_shows()
+            self._items = [ShowItem.from_row(r) for r in rows]
         elif self._mode == "movies":
-            self._items = [MediaItem.from_row(r) for r in db.movies()]
+            rows = db.movies()
+            self._items = [MediaItem.from_row(r) for r in rows]
         else:
-            self._items = []
+            rows, self._items = [], []
 
-        genres = sorted({
-            genre.strip()
-            for item in self._items
-            for genre in (getattr(item, "genres", "") or "").split(",")
-            if genre.strip()
-        })
-        current = self._genre.currentText()
-        self._genre.blockSignals(True)
-        self._genre.clear()
-        self._genre.addItem("All genres")
-        self._genre.addItems(genres)
-        if current in genres:
-            self._genre.setCurrentText(current)
-        self._genre.blockSignals(False)
+        # Categories come off the database row, not the view model: `user_genres`
+        # is a column of its own so a refetch can't wipe a hand-set category, and
+        # the dataclasses in models.py don't carry it. Built from every row
+        # before any filtering, so a chosen category never vanishes from the
+        # popover just because it currently matches nothing.
+        self._categories = {int(r["id"]): frozenset(cat.categories_of(r)) for r in rows}
+        counts = Counter(name for names in self._categories.values() for name in names)
+        self._filter.set_available([(name, counts[name])
+                                    for name in cat.CATEGORIES if name in counts])
+        self._filter.setVisible(self._mode != "search" and self._filter.has_categories())
 
         self._apply()
 
@@ -237,9 +258,17 @@ class LibraryView(QWidget):
             lowered = term.lower()
             items = [i for i in items if lowered in (getattr(i, "title", "") or "").lower()]
 
-        genre = self._genre.currentText()
-        if genre and genre != "All genres":
-            items = [i for i in items if genre in (getattr(i, "genres", "") or "")]
+        # Whole names, compared against the row's categories. The old filter
+        # asked whether the chosen word appeared anywhere in the joined genres
+        # string, so Fantasy matched every "Sci-Fi & Fantasy" series and Action
+        # matched every "Action & Adventure" one.
+        chosen = self._filter.selected()
+        mode = self._filter.mode()
+        if chosen:
+            wanted = set(chosen)
+            empty = frozenset()
+            items = [i for i in items
+                     if cat.matches(wanted, self._categories.get(int(i.id), empty), mode)]
 
         state = self._filter_group.checkedId()
         if state == 1:
@@ -253,14 +282,28 @@ class LibraryView(QWidget):
 
         items.sort(key=_SORTS[self._sort.currentIndex()][1])
 
-        self._grid.set_items(items, self._empty_message(term, genre, state))
+        self._grid.set_items(items, self._empty_message(term, chosen, mode, state))
         self._count.setText(f"{len(items)} of {len(self._items)}")
 
-    def _empty_message(self, term: str, genre: str, state: int) -> str:
+    def _empty_message(self, term: str, chosen: list, mode: str, state: int) -> str:
+        """Name every filter that is on, so it is clear what to undo."""
+        names = ""
+        if chosen:
+            # "and" under All, "or" under Any: with two chips ticked under Any,
+            # "Nothing in Anime and Comedy" describes the other mode.
+            joiner = " and " if mode == "all" else " or "
+            names = (", ".join(chosen[:-1]) + joiner + chosen[-1]
+                     if len(chosen) > 1 else chosen[0])
+        if term and names:
+            return f"Nothing in {names} matches “{term}”"
         if term:
             return f"Nothing matches “{term}”"
-        if genre != "All genres":
-            return f"No {genre.lower()} titles"
+        if names:
+            if len(chosen) > 1 and mode == "all":
+                # The common way to land here: three categories under All is
+                # usually empty, and the way out is one fewer, not a rescan.
+                return f"Nothing is in {names} at once — try Any, or one fewer"
+            return f"Nothing in {names}"
         if state == 1:
             return "You've started everything here"
         if state == 2:

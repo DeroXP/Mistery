@@ -266,6 +266,35 @@ CREATE TABLE IF NOT EXISTS lyrics (
     fetched_at REAL
 );
 
+-- Playlists, for songs and for films alike. Making, renaming, reordering and
+-- emptying one is the same work either way; only the query that turns an entry
+-- back into a row differs, so `kind` says which table `item_id` points at and
+-- the column carries no foreign key of its own. An id that no longer resolves
+-- is skipped when the list is read, the way a restored queue drops songs that
+-- have gone (music/library.tracks_by_id).
+CREATE TABLE IF NOT EXISTS playlists (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT NOT NULL,                          -- music | video
+    name       TEXT NOT NULL,
+    note       TEXT,
+    created_at REAL,
+    updated_at REAL                                    -- the page lists newest change first
+);
+
+-- One row per entry rather than per item: the same song or film may appear
+-- twice (the music queue already allows it), and an entry id is what makes
+-- "remove this one" unambiguous when it does.
+CREATE TABLE IF NOT EXISTS playlist_items (
+    id          INTEGER PRIMARY KEY,
+    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    item_id     INTEGER NOT NULL,                      -- tracks.id or media.id, per kind
+    position    INTEGER NOT NULL,                      -- 0-based, rewritten by a reorder
+    added_at    REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlist_items ON playlist_items(playlist_id, position);
+CREATE INDEX IF NOT EXISTS idx_playlists_kind ON playlists(kind, name);
+
 CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album_id, disc_no, track_no);
 CREATE INDEX IF NOT EXISTS idx_tracks_state  ON tracks(state, missing);
 CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(sort_artist, year);
@@ -310,6 +339,10 @@ _MIGRATIONS: dict[str, list[str]] = {
         "sub_lang TEXT",
         "audio_lang TEXT",
         "tvmaze_id INTEGER",      # keyless metadata source for shows
+        # Categories chosen by a person, comma-joined like `genres`. Kept apart
+        # from it because the metadata pass rewrites `genres` whenever better
+        # data arrives, and a hand-made choice must survive that.
+        "user_genres TEXT",
     ],
     "media": [
         # Per-episode values learned by audio fingerprinting; they win over the
@@ -318,6 +351,7 @@ _MIGRATIONS: dict[str, list[str]] = {
         "intro_end REAL",
         "credits_at REAL",
         "tv_state TEXT NOT NULL DEFAULT 'pending'",   # pending | done
+        "user_genres TEXT",       # see shows.user_genres
     ],
     "tracks": [
         # EBU R128 loudness and true peak, measured once per file, so every
@@ -845,6 +879,146 @@ def set_watched(media_id: int, watched: bool) -> None:
             """,
             (media_id, 0.0, duration, int(watched), time.time()),
         )
+
+
+# --- playlists --------------------------------------------------------------
+#
+# The same two tables hold music and video playlists; `kind` decides whether an
+# entry's item_id means tracks.id or media.id. Reading a playlist skips ids that
+# no longer resolve rather than deleting them: a song whose file is missing
+# today may be back tomorrow, exactly as with a restored queue.
+
+def playlists(kind: str) -> list[sqlite3.Row]:
+    """Playlists of one kind, most recently changed first, with their sizes."""
+    return query(
+        "SELECT p.*, COUNT(i.id) AS item_count FROM playlists p "
+        "LEFT JOIN playlist_items i ON i.playlist_id = p.id "
+        "WHERE p.kind = ? GROUP BY p.id ORDER BY p.updated_at DESC, p.name COLLATE NOCASE",
+        (kind,),
+    )
+
+
+def playlist(playlist_id: int) -> sqlite3.Row | None:
+    return query_one(
+        "SELECT p.*, COUNT(i.id) AS item_count FROM playlists p "
+        "LEFT JOIN playlist_items i ON i.playlist_id = p.id WHERE p.id = ? GROUP BY p.id",
+        (playlist_id,),
+    )
+
+
+def create_playlist(kind: str, name: str, note: str | None = None) -> int:
+    now = time.time()
+    with _write_lock:
+        cursor = connect().execute(
+            "INSERT INTO playlists (kind, name, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (kind, name.strip() or "Untitled", note, now, now),
+        )
+        return int(cursor.lastrowid)
+
+
+def rename_playlist(playlist_id: int, name: str, note: str | None = None) -> None:
+    execute("UPDATE playlists SET name = ?, note = ?, updated_at = ? WHERE id = ?",
+            (name.strip() or "Untitled", note, time.time(), playlist_id))
+
+
+def delete_playlist(playlist_id: int) -> None:
+    # playlist_items goes with it: the foreign key cascades, and every
+    # connection turns foreign keys on (see connect).
+    execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+
+
+def playlist_entries(playlist_id: int) -> list[sqlite3.Row]:
+    """(id, item_id, position) in playing order."""
+    return query(
+        "SELECT id, item_id, position FROM playlist_items WHERE playlist_id = ? ORDER BY position",
+        (playlist_id,),
+    )
+
+
+def add_to_playlist(playlist_id: int, item_ids: Sequence[int]) -> int:
+    """Append items; returns how many were added, 0 if that playlist has gone.
+
+    Every connection has foreign keys on, so inserting into a playlist deleted
+    since the menu was built (a second instance, a maintenance script) raised
+    IntegrityError from inside a slot: PySide6 prints the traceback and carries
+    on, so the click did nothing and said nothing. The other helpers are UPDATE
+    and DELETE and already no-op on a missing row; this one now answers the
+    same way, and the caller says so.
+    """
+    ids = [int(i) for i in item_ids]
+    if not ids:
+        return 0
+    now = time.time()
+    with _write_lock:
+        conn = connect()
+        if conn.execute("SELECT 1 FROM playlists WHERE id = ?", (playlist_id,)).fetchone() is None:
+            return 0
+        row = conn.execute("SELECT MAX(position) AS last FROM playlist_items WHERE playlist_id = ?",
+                           (playlist_id,)).fetchone()
+        start = (row["last"] + 1) if row and row["last"] is not None else 0
+        conn.executemany(
+            "INSERT INTO playlist_items (playlist_id, item_id, position, added_at) VALUES (?, ?, ?, ?)",
+            [(playlist_id, item_id, start + offset, now) for offset, item_id in enumerate(ids)],
+        )
+        conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (now, playlist_id))
+    return len(ids)
+
+
+def remove_playlist_entries(playlist_id: int, entry_ids: Sequence[int]) -> None:
+    ids = [int(i) for i in entry_ids]
+    if not ids:
+        return
+    now = time.time()
+    with _write_lock:
+        conn = connect()
+        conn.executemany("DELETE FROM playlist_items WHERE id = ? AND playlist_id = ?",
+                         [(entry_id, playlist_id) for entry_id in ids])
+        # Close the gaps, so positions stay 0..n-1 and a later reorder has
+        # nothing odd to work around.
+        rows = conn.execute("SELECT id FROM playlist_items WHERE playlist_id = ? ORDER BY position",
+                            (playlist_id,)).fetchall()
+        conn.executemany("UPDATE playlist_items SET position = ? WHERE id = ?",
+                         [(index, row["id"]) for index, row in enumerate(rows)])
+        conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (now, playlist_id))
+
+
+def set_playlist_order(playlist_id: int, entry_ids: Sequence[int]) -> None:
+    """The whole run of entry ids, in the order they should play."""
+    now = time.time()
+    with _write_lock:
+        conn = connect()
+        conn.executemany("UPDATE playlist_items SET position = ? WHERE id = ? AND playlist_id = ?",
+                         [(index, int(entry_id), playlist_id) for index, entry_id in enumerate(entry_ids)])
+        conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (now, playlist_id))
+
+
+def playlists_holding(kind: str, item_id: int) -> set[int]:
+    """Which playlists of this kind already hold the item — for the ticks in
+    the "Add to playlist" menu."""
+    rows = query(
+        "SELECT DISTINCT p.id FROM playlists p JOIN playlist_items i ON i.playlist_id = p.id "
+        "WHERE p.kind = ? AND i.item_id = ?", (kind, item_id))
+    return {int(row["id"]) for row in rows}
+
+
+def playlist_media(playlist_id: int) -> list[sqlite3.Row]:
+    """The films and episodes of a video playlist, in playing order.
+
+    Rows come back exactly as the library pages expect them (position and
+    watched joined in), so a playlist page can use the same cards. Entries
+    whose media row has gone, or which cannot be played yet, are left out.
+    """
+    entries = playlist_entries(playlist_id)
+    if not entries:
+        return []
+    ids = [int(row["item_id"]) for row in entries]
+    found = {}
+    for start in range(0, len(ids), 400):        # SQLite's variable limit is 999
+        chunk = ids[start:start + 400]
+        marks = ",".join("?" * len(chunk))
+        for row in query(f"{MEDIA_WITH_PROGRESS} WHERE m.id IN ({marks}) AND {READY}", chunk):
+            found[int(row["id"])] = row
+    return [found[item_id] for item_id in ids if item_id in found]
 
 
 # --- http cache -------------------------------------------------------------

@@ -15,8 +15,9 @@ from pathlib import Path
 
 import requests
 
-from .. import db
+from .. import __version__, db
 from ..config import art_dir
+from . import categories
 
 _TIMEOUT = 12.0
 _CACHE_TTL = 60 * 60 * 24 * 30
@@ -27,7 +28,21 @@ _MIN_INTERVAL = 0.8
 _MAX_RETRIES = 3
 
 _session = requests.Session()
-_session.headers["User-Agent"] = "Mistery/1.0 (local media library)"
+_session.headers["User-Agent"] = f"Mistery/{__version__} (local media library)"
+
+# Hosts that ask for more room than that. Apple documents about 20 calls a
+# minute for the Search API, which is 3 s.
+#
+# Wikidata is a guess, not a measurement. An earlier comment here claimed 429
+# after 12 requests 1.4 s apart; re-running 16 different films' Q-ids through
+# this code at 1.5 s gave 16 answers, 0 failures, 22.7 s in total, so whatever
+# that was, it was not the steady-state limit. 1.5 s is kept because the query
+# service runs arbitrary SPARQL for everyone and asks callers to go easy, not
+# because 0.8 s was seen to fail. _get_json honours a 429 either way.
+_HOST_INTERVAL = {
+    "itunes.apple.com": 3.0,
+    "query.wikidata.org": 1.5,
+}
 
 _last_request: dict[str, float] = {}
 _throttle_lock = threading.Lock()
@@ -55,10 +70,11 @@ def _back_off(seconds: float) -> None:
 
 def _wait_turn(host: str) -> None:
     with _throttle_lock:
+        interval = _HOST_INTERVAL.get(host, _MIN_INTERVAL)
         previous = _last_request.get(host, 0.0)
         gap = time.monotonic() - previous
-        if gap < _MIN_INTERVAL:
-            time.sleep(_MIN_INTERVAL - gap)
+        if gap < interval:
+            time.sleep(interval - gap)
         _last_request[host] = time.monotonic()
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -74,8 +90,13 @@ def _strip_html(text: str | None) -> str | None:
     return _TAG_RE.sub("", text).replace(" ", " ").strip() or None
 
 
-def _get_json(url: str, params: dict | None = None) -> dict | list | None:
-    """GET with month-long caching. 404s cache as misses so they aren't retried."""
+def _get_json(url: str, params: dict | None = None, trim=None) -> dict | list | None:
+    """GET with month-long caching. 404s cache as misses so they aren't retried.
+
+    `trim`, when given, is applied to the parsed body before it is both cached
+    and returned, so the cache and a live reply are always the same shape. It
+    is for a reply that is mostly fields nothing here reads — see _itunes_trim.
+    """
     key = f"online:{url}:{json.dumps(sorted((params or {}).items()))}"
     cached = db.cache_get(key, _CACHE_TTL)
     if cached is not None:
@@ -121,6 +142,8 @@ def _get_json(url: str, params: dict | None = None) -> dict | list | None:
         data = response.json()
     except ValueError as exc:
         raise OnlineError(f"unreadable response: {exc}") from exc
+    if trim is not None:
+        data = trim(data)
     db.cache_put(key, json.dumps(data))
     return data
 
@@ -286,36 +309,42 @@ def _title_variants(title: str) -> list[str]:
     return list(dict.fromkeys(variants))
 
 
-def wikipedia_movie(title: str, year: int | None) -> dict | None:
-    """Poster and plot summary from the film's Wikipedia article.
+def wikipedia_article(title: str, year: int | None) -> dict | None:
+    """The film's Wikipedia article summary, or None when there isn't one.
 
     Search first, then verify. Guessing article titles took up to ten requests
     for a film with no article and got us rate-limited; searching costs one
     request and handles punctuation a filename could not represent (a colon in
     "Spider-Man: Across the Spider-Verse" becomes " - " on disk).
+
+    Separate from wikipedia_movie because the categories lookup wants the same
+    article for its `wikibase_item` and the month-long cache makes the second
+    caller free: all 11 of this library's matched films answered in 0.02 s each
+    on the second pass.
     """
     variants = _title_variants(title)
     query = f"{variants[-1]} film"
     if year:
         query = f"{variants[-1]} {year} film"
 
-    data = None
     for page_title in _wikipedia_search(query)[:3]:
         if not _title_close_enough(page_title, title):
             continue
         found = _wikipedia_summary(page_title)
         if found and _is_film_article(found, year):
-            data = found
-            break
+            return found
 
-    if data is None:
-        # Exact article name as a last resort, for titles search ranks poorly.
-        for candidate in ([f"{variants[0]} ({year} film)"] if year else []) + [variants[0]]:
-            found = _wikipedia_summary(candidate)
-            if found and _is_film_article(found, year):
-                data = found
-                break
+    # Exact article name as a last resort, for titles search ranks poorly.
+    for candidate in ([f"{variants[0]} ({year} film)"] if year else []) + [variants[0]]:
+        found = _wikipedia_summary(candidate)
+        if found and _is_film_article(found, year):
+            return found
+    return None
 
+
+def wikipedia_movie(title: str, year: int | None) -> dict | None:
+    """Poster and plot summary from the film's Wikipedia article."""
+    data = wikipedia_article(title, year)
     if data is None:
         return None
 
@@ -343,7 +372,158 @@ def _is_film_article(data: dict, year: int | None) -> bool:
 
 
 def _title_close_enough(found: str, wanted: str) -> bool:
-    """Guard against a search result that is merely related to the film."""
+    """Guard against a search result that is merely related to the film.
+
+    `_normalise` keeps only a-z and 0-9, so a title written in Japanese,
+    Chinese or Cyrillic — or one that is all punctuation, like "!!!" — comes
+    out as "". "" is a substring of every article title there is, so the
+    substring test below waved through whatever Wikipedia's search happened to
+    rank first, and movie_categories then wrote that article's Wikidata genres
+    onto the film. Those titles get a plain case-folded compare instead: it is
+    strict, but a film called 君の名は has an article called 君の名は.
+    """
     found_key = _normalise(re.sub(r"\(.*?\)", "", found))
     wanted_key = _normalise(wanted)
+    if not found_key or not wanted_key:
+        bare = re.sub(r"\s*\(.*?\)", "", found or "").strip().casefold()
+        return bare == (wanted or "").strip().casefold()
     return found_key == wanted_key or wanted_key in found_key or found_key in wanted_key
+
+
+# --- Categories for films, with no API key -----------------------------------
+#
+# Films are the gap: TVmaze gives shows their genres (including "Anime"), but
+# the keyless film source is Wikipedia, whose summary endpoint carries no genre
+# at all. Measured on this library: 0 of 12 films had a single genre, so the
+# categories filter would have been an empty row of chips on the Movies page.
+#
+# Two sources, in order of how well they answered those 12 films:
+#  * Wikidata, reached through the `wikibase_item` already sitting in the
+#    Wikipedia summary this app fetched anyway. 11 of 12 (the twelfth is an
+#    episode filed as a film and has no article). One request per film.
+#  * iTunes, for films Wikipedia never matched. It answered 2 of 12 on a strict
+#    title-and-year match — worth having, not worth relying on.
+
+_QID_RE = re.compile(r"^Q[1-9][0-9]*$")
+
+# genre, what the thing *is*, and where it is from — enough for "anime", which
+# no genre vocabulary outside TVmaze has a word for. One request instead of the
+# three the wbgetclaims API needs, and 25 KB instead of 180 KB.
+_WIKIDATA_SPARQL = """SELECT ?gLabel ?iLabel ?cLabel WHERE {
+  VALUES ?work { wd:%s }
+  OPTIONAL { ?work wdt:P136 ?g }
+  OPTIONAL { ?work wdt:P31 ?i }
+  OPTIONAL { ?work wdt:P495 ?c }
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+}"""
+
+
+def wikidata_categories(qid: str) -> list[str]:
+    """Category names for one Wikidata item, e.g. Q29588607 -> Action, Comedy…"""
+    if not _QID_RE.match(qid or ""):
+        return []           # the id goes straight into the query text
+    data = _get_json("https://query.wikidata.org/sparql",
+                     {"query": _WIKIDATA_SPARQL % qid, "format": "json"})
+    if not isinstance(data, dict):
+        # The same guard the TVmaze and Wikipedia readers above use. A 200 with
+        # a JSON array or string in it — a proxy or a captive portal — used to
+        # raise AttributeError past _categories_stage's `except OnlineError`
+        # into the pipeline's one catch-all, which then skipped the thumbnail
+        # and intro stages for that whole pass.
+        return []
+    results = data.get("results")
+    rows = results.get("bindings") if isinstance(results, dict) else None
+    if not isinstance(rows, list):
+        return []
+
+    found: list[str] = []
+    kinds: set[str] = set()
+    countries: set[str] = set()
+    for row in rows:
+        for name in categories.expand((row.get("gLabel") or {}).get("value") or ""):
+            if name not in found:
+                found.append(name)
+        kinds.add(((row.get("iLabel") or {}).get("value") or "").lower())
+        countries.add(((row.get("cLabel") or {}).get("value") or "").lower())
+
+    # "Anime film" is its own thing to Wikidata; "animated film" plus Japan is
+    # how everything older than that entry is described. Wikidata's genre list
+    # never says either — Chainsaw Man's reads action/romantic drama/
+    # supernatural/dark fantasy — so this is where Anime comes from for films.
+    animated = any("anime" in kind or "animat" in kind for kind in kinds)
+    if any("anime" in kind for kind in kinds) or (animated and "japan" in countries):
+        found += ["Anime", "Animation"]
+    elif animated:
+        found.append("Animation")
+    return [name for name in categories.CATEGORIES if name in set(found)]
+
+
+_ITUNES_FIELDS = ("kind", "trackName", "releaseDate", "primaryGenreName")
+
+
+def _itunes_trim(data):
+    """The four fields itunes_movie_categories reads, and nothing else.
+
+    A limit=50 reply is mostly artwork URLs, prices, long descriptions and store
+    ids that nothing here looks at: "The Amazing Spider-Man 2" came back as
+    102,371 bytes, against 2.5-4.6 KB for a Wikipedia row and 1.2-3.2 KB for a
+    Wikidata one. http_cache is written for a month and never pruned — nothing
+    in app/ deletes an expired row and there is no VACUUM — so every film
+    Wikidata could not answer for was leaving 100 KB in the library database for
+    good. Trimmed, the same 57 results are 7,895 bytes, 13x smaller.
+
+    Every result is kept, not just the feature-movie ones, so that the day Apple
+    renames `kind` the cached reply still shows what it now says.
+
+    The limit of 50 stays: without `entity=movie` a film can rank well down a
+    page of songs and albums of the same name, so the results have to be deep.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        return data
+    return {"results": [{k: row.get(k) for k in _ITUNES_FIELDS}
+                        for row in data["results"] if isinstance(row, dict)]}
+
+
+def itunes_movie_categories(title: str, year: int | None) -> list[str]:
+    """Category names from the iTunes Search API. No key, one request.
+
+    Searched without `entity=movie`: that filter has stopped returning anything
+    at all (0 results for every term tried, in both the US and GB stores, on
+    2026-09-17), while the same search unfiltered still comes back with
+    `kind: feature-movie` rows. Films are picked out of the mixed results here
+    instead, and only an exact title with a matching year counts — the store's
+    ranking happily offers "Spider-Man: Brand New Day" for "Spider-Man 3".
+    """
+    data = _get_json("https://itunes.apple.com/search", {"term": title, "limit": 50},
+                     trim=_itunes_trim)
+    if not isinstance(data, dict):
+        return []               # see wikidata_categories: a 200 that isn't JSON
+    wanted = _normalise(title)
+    entries = data.get("results")
+    for entry in entries if isinstance(entries, list) else []:
+        if entry.get("kind") != "feature-movie":
+            continue
+        name = entry.get("trackName") or ""
+        if _normalise(re.sub(r"\(.*?\)", "", name)) != wanted:
+            continue
+        released = (entry.get("releaseDate") or "")[:4]
+        if year and released.isdigit() and abs(int(released) - year) > 1:
+            continue
+        found = categories.expand(entry.get("primaryGenreName") or "")
+        if found:
+            return found
+    return []
+
+
+def movie_categories(title: str, year: int | None) -> str | None:
+    """Categories for a film with no TMDB key, ready for the `genres` column.
+
+    Both sources are cached for a month like everything else here, so a second
+    pass over a library costs nothing and a film that genuinely has no article
+    is not searched for again until the cache ages out.
+    """
+    article = wikipedia_article(title, year)
+    found = wikidata_categories((article or {}).get("wikibase_item") or "")
+    if not found:
+        found = itunes_movie_categories(title, year)
+    return categories.join(found) or None

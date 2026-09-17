@@ -30,7 +30,7 @@ import math
 import random
 import time
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QConicalGradient, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
     QPixmap, QRadialGradient, QTransform,
@@ -124,7 +124,7 @@ def _ease_in_out(u: float) -> float:
     return 4 * u * u * u if u < 0.5 else 1 - (-2 * u + 2) ** 3 / 2
 
 
-def _readable_accent(colour: str) -> QColor:
+def readable_accent(colour: str) -> QColor:
     """The album's accent, lifted if it would vanish against black vinyl."""
     accent = QColor(colour or "#E50914")
     if not accent.isValid():
@@ -147,7 +147,14 @@ class VinylView(QWidget):
     the GUI process used ~4.2% of a core with the record turning against ~1.6%
     with the flat cover, i.e. about 2.6% for ~30 small frames a second. Paused,
     and with the page hidden or the window minimised, the record draws nothing.
+
+    `frame` is emitted on every frame the timer runs, so something else on the
+    same screen can share this clock instead of starting a second timer of its
+    own — two 50 ms timers flush the window's backing store twice as often as
+    one for the same picture. The screensaver's waveform rides on it.
     """
+
+    frame = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -156,7 +163,9 @@ class VinylView(QWidget):
 
         self._path: str | None = None
         self._image = QImage()              # the cover, pre-shrunk once to label scale
-        self._accent = _readable_accent("#E50914")
+        self._accent = readable_accent("#E50914")
+        self._sheen = 1.0                   # the screensaver turns the fixed highlight down
+        self._dim = 1.0                     # ...and the whole record, as the hours pass
 
         # Cached drawings, rebuilt only when their key (size, ratio, colour, cover) changes.
         self._body: QPixmap | None = None
@@ -213,12 +222,51 @@ class VinylView(QWidget):
         self.update(self._label_rect())
 
     def set_accent(self, colour: str) -> None:
-        accent = _readable_accent(colour)
+        accent = readable_accent(colour)
         if accent != self._accent:
             self._accent = accent
             self._body = None
             self._arm_paths = None
             self.update()
+
+    def set_sheen(self, strength: float) -> None:
+        """How strong the fixed highlight is, 0 to 1.
+
+        It is the one thing on the record that never moves — that is what makes
+        the record read as spinning rather than as a picture being turned — and
+        on an OLED asked to hold this for hours it is also the one thing that
+        would wear a shape into the panel. The screensaver asks for 0.35.
+        """
+        strength = max(0.0, min(1.0, float(strength)))
+        if abs(strength - self._sheen) > 0.01:
+            self._sheen = strength
+            self._body = None
+            self.update()
+
+    def set_dim(self, level: float) -> None:
+        """Fade the whole record. Painter opacity over the cached pixmaps, not a
+        redraw: against black, opacity is the dimming, and rebuilding the body
+        at screensaver size would cost a ~3.5 MB pixmap every step."""
+        level = max(0.0, min(1.0, float(level)))
+        if abs(level - self._dim) > 0.004:
+            self._dim = level
+            self.update()
+
+    def set_frame_interval(self, milliseconds: int) -> None:
+        """Slower frames for a record nobody is watching closely (the
+        screensaver runs at 50 ms, i.e. 20 fps, against the usual 33)."""
+        self._timer.setInterval(max(16, int(milliseconds)))
+
+    @staticmethod
+    def box_for_radius(radius: float) -> QSize:
+        """How big this view has to be for the record to come out `radius`
+        across. _layout() takes the smaller of the two fits, so give it both
+        exactly — a caller that wants a particular diameter cannot get there by
+        guessing at the tonearm's share of the width."""
+        across = _RIGHT - _LEFT
+        tall = 1.0 - _TOP
+        return QSize(int(math.ceil(radius * across + 8.0)),
+                     int(math.ceil(radius * tall + _BOTTOM_GAP + 4.0)))
 
     def set_playing(self, playing: bool, animate: bool = True) -> None:
         """Spin up and lower the arm, or lift it and coast to a stop."""
@@ -361,6 +409,10 @@ class VinylView(QWidget):
         if not dirty.isEmpty():
             self.frames += 1
             self.update(dirty)
+        # Emitted whether or not this frame drew anything: a passenger's own
+        # picture may have moved when the record's has not, and a beat that
+        # skips is worse than one that sometimes costs nothing.
+        self.frame.emit()
         if not self._moving(now):
             self._timer.stop()
 
@@ -467,7 +519,9 @@ class VinylView(QWidget):
         R = self._radius
         c = self._centre
 
-        key = (round(R, 2), ratio, self._accent.rgba())
+        if self._dim < 1.0:
+            painter.setOpacity(self._dim)
+        key = (round(R, 2), ratio, self._accent.rgba(), round(self._sheen, 2))
         if self._body is None or self._body_key != key:
             self._body = self._build_body(R, ratio)
             self._body_key = key
@@ -563,6 +617,7 @@ class VinylView(QWidget):
             alpha = (0.34 * self._lobe(degrees, 128.0, 11.0) + 0.22 * self._lobe(degrees, 128.0, 30.0)
                      + 0.20 * self._lobe(degrees, 308.0, 12.0) + 0.14 * self._lobe(degrees, 308.0, 32.0)
                      + 0.05 * self._lobe(degrees, 38.0, 40.0) + 0.04 * self._lobe(degrees, 218.0, 40.0))
+            alpha *= self._sheen
             colour = QColor(tint)
             colour.setAlphaF(min(1.0, alpha))
             cone.setColorAt(step / steps, colour)

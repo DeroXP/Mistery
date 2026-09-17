@@ -124,6 +124,8 @@ class _PipelineTask(QRunnable):
                 self._probe_stage()
             if not self._stop:
                 self._metadata_stage()
+            if not self._stop:
+                self._categories_stage()
             if not self._stop and settings.get("generate_thumbs", True):
                 self._thumbs_stage()
             if not self._stop and settings.get("detect_intros", True):
@@ -296,6 +298,66 @@ class _PipelineTask(QRunnable):
             self._emit(service.media_updated, int(row["id"]))
 
         if pending:
+            self._emit(service.library_changed)
+
+    def _categories_stage(self) -> None:
+        """Categories for any film that still has none, whoever was asked.
+
+        TVmaze gives every show its genres, but Wikipedia gives films none at
+        all, so a keyless library had 0 of 12 films with a single genre here and
+        the Movies page would have had nothing to filter by. online.movie_
+        categories asks Wikidata (through the article the metadata stage already
+        cached) and then iTunes; it found categories for 11 of those 12 in 16 s
+        cold, and 0.0 s on the pass after, since both answers cache for a month.
+
+        Deliberately not gated on `tmdb_api_key`. A keyed library has the same
+        hole, just a smaller one — a film TMDB could not match, or matched to an
+        entry with no genres, ends up here too, and there is no other way for it
+        to get a chip. The bill for that is about 3 s of throttled network per
+        film that is still uncached (0.8 s Wikipedia, 1.5 s Wikidata, 3.0 s
+        iTunes when Wikidata says nothing), paid once a month per film, ahead of
+        thumbnails and intro detection.
+
+        It writes `genres` only where it is empty. A row TMDB filled is never
+        touched, so a keyless guess can never replace real data — the same rule
+        the metadata stage follows for artwork.
+        """
+        service = self._service
+        rows = db.query(
+            "SELECT id, title, year FROM media "
+            "WHERE kind = 'movie' AND missing = 0 AND (genres IS NULL OR genres = '') "
+            "ORDER BY sort_title"
+        )
+        if not rows:
+            return
+        found = 0
+        for index, row in enumerate(rows, start=1):
+            if self._stop:
+                return
+            self._emit(service.status,
+                       f"Looking for categories ({index}/{len(rows)}) — {row['title']}")
+            try:
+                genres = online.movie_categories(row["title"], row["year"])
+            except online.OnlineError as exc:
+                # One unreachable host means the rest of the list is unreachable
+                # too; the rows stay empty and the next pass asks again.
+                self._emit(service.status, f"Online lookup unavailable: {exc}")
+                break
+            except Exception:
+                # Categories are the least of what this pipeline does, and they
+                # run before thumbnails and intro detection. Left to reach run()'s
+                # catch-all, anything unexpected here — a reply in a shape nobody
+                # predicted — took those two stages down with it for the whole
+                # pass. Report it and stop this stage only.
+                self._emit(service.error, traceback.format_exc(limit=6))
+                self._emit(service.status, "Could not look up categories")
+                break
+            if not genres:
+                continue
+            db.update_media(int(row["id"]), genres=genres)
+            self._emit(service.media_updated, int(row["id"]))
+            found += 1
+        if found:
             self._emit(service.library_changed)
 
     def _generate_art(self, row) -> dict:

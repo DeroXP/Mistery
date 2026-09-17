@@ -306,7 +306,16 @@ DEFAULTS: dict = {
     "music_bass": "off",            # off | warm | deep | massive
     "music_clarity": False,         # a 3 dB lift at the top end
     "music_spatial": "off",         # off | subtle | normal | wide  (headphones)
+    "music_muted": False,           # mpv's own mute, so a mute keeps the level it was at
+    # The lyrics tab takes over the screen while a song plays and nobody has
+    # touched anything. Built for OLED panels: see ui/screensaver.py.
+    "music_screensaver": True,
+    "music_screensaver_after": 180,     # seconds of stillness before it starts
     # library behaviour
+    # Categories chosen on the Movies and Shows pages, kept between sessions so
+    # a narrowed library is still narrowed tomorrow.
+    "movie_categories": [],
+    "show_categories": [],
     "generate_thumbs": True,
     "thumb_count": 120,
     "detect_intros": True,       # learn intro/credits by matching audio across a season
@@ -316,6 +325,9 @@ DEFAULTS: dict = {
     "watched_threshold": 0.92,   # fraction of runtime after which it counts as watched
     "resume_min_seconds": 30,    # don't offer resume for the first N seconds
     "scan_on_startup": True,
+    # Updates. The updater is a separate program that only runs when Mistery
+    # has been closed for half an hour; this is the switch that stops it.
+    "auto_update": True,
 }
 
 

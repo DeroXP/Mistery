@@ -252,6 +252,13 @@ else:  # pragma: no cover - the app targets Windows, this keeps imports working
 class MpvProcess(QObject):
     """A running mpv instance rendered into a Qt widget's native window."""
 
+    # The ceiling this mpv runs with: --volume-max on the command line, and
+    # the clamp in set_volume. mpv clamps a higher number silently, which
+    # would leave a caller's send-guard believing a level mpv never took —
+    # so set_volume hands back what it really sent. AudioMpv lowers both to
+    # 100, the ceiling music runs with.
+    volume_max = 150
+
     property_changed = Signal(str, object)
     file_loaded = Signal()
     end_file = Signal(str)          # reason: eof / stop / quit / error / redirect
@@ -387,7 +394,7 @@ class MpvProcess(QObject):
             f"--slang={settings.get('preferred_sub_lang', 'eng')}",
             f"--sub-visibility={'yes' if settings.get('subs_on_by_default') else 'no'}",
             f"--volume={int(settings.get('volume', 80))}",
-            "--volume-max=150",
+            f"--volume-max={self.volume_max}",
             "--audio-client-name=Mistery",
             "--title=Mistery",
             "--sub-font-size=42",
@@ -784,8 +791,14 @@ class MpvProcess(QObject):
     def seek_absolute(self, position: float) -> None:
         self.command("seek", position, "absolute", "exact")
 
-    def set_volume(self, value: int) -> None:
-        self.set_property("volume", max(0, min(150, int(value))))
+    def set_volume(self, value: float) -> float:
+        """mpv's volume, clamped to this process's ceiling. Returns the number
+        actually sent: a caller that remembers what it sent (the music fade,
+        player._apply_volume) needs the clamped one, not the one it asked for.
+        Takes a float because that fade is a fraction of the level."""
+        value = max(0.0, min(float(self.volume_max), float(value)))
+        self.set_property("volume", value)
+        return value
 
     def set_speed(self, value: float) -> None:
         self.set_property("speed", max(0.25, min(4.0, float(value))))
