@@ -134,7 +134,12 @@ def check_updater_swap() -> None:
 
 
 def main() -> int:
-    sandbox = Path(tempfile.mkdtemp(prefix="mistery-frozen-paths-"))
+    # .resolve(), because install_dir() resolves what it is handed and Windows
+    # gives temp folders out under their 8.3 short name on some machines: a
+    # GitHub runner's TEMP sits under RUNNER~1, which resolves to runneradmin.
+    # Comparing a resolved path against an unresolved one passed on every
+    # machine here and failed only there, which is the worst kind of test.
+    sandbox = Path(tempfile.mkdtemp(prefix="mistery-frozen-paths-")).resolve()
     install = sandbox / "Programs" / "Mistery"
     own_mpv = sandbox / "elsewhere"
     path_before = os.environ.get("PATH", "")
