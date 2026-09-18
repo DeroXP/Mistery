@@ -223,6 +223,12 @@ service's root directory, so the one setting that matters is the root.
    `DeroXP/Mistery`. The first deploy will fail — it is building the repository
    root, which is a media player, not a web service. Expected; keep going.
 2. Service → **Settings** → **Root Directory**: `server`
+
+   Do this before anything else. Skipping it is what produces
+   *"No start command detected"* from Railpack: it is looking at the repository
+   root, which is a desktop player with no web app in it. The start command
+   lives in `server/railway.json` (and again in `server/Procfile`), and Railway
+   only reads those from the service's root directory.
 3. Service → **Variables** → add:
 
    | Name | Value |

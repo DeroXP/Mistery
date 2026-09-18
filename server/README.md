@@ -209,3 +209,19 @@ because there is nothing here to steal: no key, no token, no data. Redeploy from
 the repository, and check that `/api/update` still serves a manifest whose
 signature verifies against `packaging/public_key.txt`. The release signing key
 is what matters, and it has never been on this machine.
+
+## If Railway says "No start command detected"
+
+It is building the repository root instead of this folder — the root is a
+desktop media player, so Railpack finds Python, finds no web app, and stops.
+
+Service → Settings → **Root Directory** → `server`, then redeploy.
+
+`railway.json` here names the start command, and `Procfile` names it a second
+way for builders that read one and not the other. Both say the same thing:
+
+    uvicorn service:app --host 0.0.0.0 --port $PORT --no-server-header --no-access-log
+
+`--no-access-log` is not decoration. It is what makes the page's promise to keep
+no record of visitors true, so keep it if you ever set the start command by hand
+in Railway's own settings.
