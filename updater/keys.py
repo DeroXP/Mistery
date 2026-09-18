@@ -31,7 +31,7 @@ import hashlib
 
 # The key releases are signed with. Base64, 44 characters, 32 bytes decoded.
 # Empty until `python packaging\make_key.py` has been run once.
-UPDATE_PUBLIC_KEY = ""
+UPDATE_PUBLIC_KEY = "O29eY0C3uBU+SZ48GYMOzjSmEaRq3wUfjqv1Nb+3uhs="
 
 # Older keys, kept only while rotating. Sign the release with the new key, ship
 # an updater carrying both, and drop the old one a release or two later once

@@ -176,6 +176,16 @@ def run_end_to_end(work: Path, server_signing, updater_manifest, updater_keys) -
     sign_manifest.PUBLIC_KEY_FILE = work / "public_key.txt"
     sign_manifest.PUBLIC_KEY_FILE.write_text(
         base64.b64encode(public_key).decode("ascii") + "\n", encoding="ascii", newline="\n")
+
+    # And point the updater's trusted key at the throwaway one too, before
+    # signing rather than after: sign_manifest cross-checks what it has just
+    # written against updater/keys.py and refuses a manifest no installed copy
+    # would take. That check is right, and it means a test signing with its own
+    # key has to say so first. It was invisible until a real key existed —
+    # with keys.py empty, the cross-check skipped itself.
+    real_updater_key = getattr(updater_keys, "UPDATE_PUBLIC_KEY", None) if updater_keys else None
+    if updater_keys:
+        updater_keys.UPDATE_PUBLIC_KEY = base64.b64encode(public_key).decode("ascii")
     try:
         base_url = "https://github.com/DeroXP/Mistery/releases/download/v" + version
         started = time.perf_counter()
@@ -215,9 +225,7 @@ def run_end_to_end(work: Path, server_signing, updater_manifest, updater_keys) -
             check("server/signing.py", server_body == body,
                   f"{timings['server verify']:.1f} ms")
         if updater_manifest and updater_keys:
-            # The updater trusts what was compiled into it. Point that at the
-            # throwaway key for the length of this test.
-            updater_keys.UPDATE_PUBLIC_KEY = base64.b64encode(public_key).decode("ascii")
+            # Already pointed at the throwaway key above, before signing.
             started = time.perf_counter()
             updater_body = updater_manifest.verify(raw)
             timings["updater verify"] = (time.perf_counter() - started) * 1000
@@ -272,6 +280,8 @@ def run_end_to_end(work: Path, server_signing, updater_manifest, updater_keys) -
               not (work / "no.json").exists())
     finally:
         sign_manifest.PUBLIC_KEY_FILE = real_public_key_file
+        if updater_keys and real_updater_key is not None:
+            updater_keys.UPDATE_PUBLIC_KEY = real_updater_key
 
     print("\ncheck_version.py, the guard on the tag")
     check("the right tag passes", check_version.main([f"v{version}"]) == 0)
