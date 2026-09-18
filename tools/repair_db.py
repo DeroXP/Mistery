@@ -24,7 +24,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+if __name__ == "__main__":
+    # `python tools/repair_db.py` starts with tools\ on sys.path and nothing
+    # else, so app\ has to be added. Imported as tools.repair_db — which is how
+    # Mistery itself runs the repair, and the only way it works frozen — the
+    # app is already importable and there is no folder to add.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import db
 from app.config import app_is_running, db_path

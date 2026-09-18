@@ -13,14 +13,18 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Run from source, `python main.py` needs this folder on sys.path to find app\.
+# Frozen there is no folder to add: __file__ points inside the PyInstaller
+# payload, which the bundled importer already owns.
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app import db
-from app.config import find_mpv, icon_path
+from app.config import assets_dir, find_mpv, icon_path
 from app.ui.main_window import MainWindow
 from app.ui.theme import C
 
@@ -33,6 +37,45 @@ def _set_windows_app_id() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Mistery.Player.1")
     except Exception:
         pass
+
+
+def _swap_in_new_updater(folder: Path | None = None) -> None:
+    """Finish the updater's own update, if one is waiting. Never raises.
+
+    MisteryUpdate.exe installs updates, and it cannot install one over itself
+    while it is the process running — so an update that carries a new updater
+    leaves it beside the old one as MisteryUpdate.exe.new, and Mistery, which is
+    never running at the moment an update is applied, finishes the job. Windows
+    is happy to rename a file that is in use (a process holds its image by
+    handle, not by name), so nothing here fails because the hourly task ran a
+    minute ago. Without this the updater is frozen at the version it was
+    installed with, for the life of the install.
+
+    First thing in main(), before the single-instance check: a second Mistery
+    that exits a moment later would otherwise skip it. Cost when there is
+    nothing to do, which is every start but one in a hundred: one os.stat of a
+    file that is not there, about 30 microseconds.
+
+    The folder argument is for packaging/test_updater.py, which points it at a
+    throwaway install; main() calls it with nothing.
+    """
+    if sys.platform != "win32":
+        return
+    if folder is None:
+        folder = Path(sys.executable if getattr(sys, "frozen", False)
+                      else __file__).resolve().parent
+    staged = folder / "MisteryUpdate.exe.new"
+    if not staged.is_file():
+        return
+    target = folder / "MisteryUpdate.exe"
+    previous = folder / "MisteryUpdate.exe.old"
+    try:
+        previous.unlink(missing_ok=True)     # last time's, if it was in use then
+        if target.exists():
+            target.replace(previous)         # renamed out of the way, never deleted
+        staged.replace(target)
+    except OSError:
+        pass    # the scheduled task keeps running the old updater, which works
 
 
 def _dark_palette(app: QApplication) -> None:
@@ -93,11 +136,31 @@ def _clear_lock() -> None:
 
 
 def _instance_channel() -> str:
-    """A name only this Windows user's Mistery listens on."""
+    """A name only this Windows user's Mistery listens on.
+
+    A library pointed at with MISTERY_DATA_DIR gets a name of its own. What the
+    one-instance rule is really protecting is the library: two copies scanning
+    and writing the same one fight, and a copy aimed at a throwaway folder is
+    not doing that. Without it a frozen Mistery cannot be started for a test
+    while the real one is open — it asks the real one to show itself and quits,
+    which is exactly what packaging/smoke_frozen.py hit.
+
+    Unset — every normal start, and the case the updater and the installer check
+    for with OpenMutexW — the name is Mistery-<user> and nothing else, the same
+    string it has always been.
+    """
     import getpass
+    import hashlib
     import re
 
-    return "Mistery-" + re.sub(r"[^A-Za-z0-9_-]", "_", getpass.getuser() or "user")
+    name = "Mistery-" + re.sub(r"[^A-Za-z0-9_-]", "_", getpass.getuser() or "user")
+    elsewhere = os.environ.get("MISTERY_DATA_DIR")
+    if elsewhere:
+        # Eight hex characters of the folder's path: enough to tell two
+        # throwaway libraries apart, short enough to stay a legal object name.
+        digest = hashlib.sha256(str(Path(elsewhere).resolve()).lower().encode())
+        name += "-" + digest.hexdigest()[:8]
+    return name
 
 
 _instance_mutex: int | None = None
@@ -244,18 +307,16 @@ def _repair_and_restart() -> int:
     that failed part way through being built may already have its timers and
     background pool going.
     """
-    import importlib.util
-
     from app.log import log_path
 
     log = logging.getLogger("repair")
     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
     try:
-        spec = importlib.util.spec_from_file_location(
-            "repair_db", Path(__file__).resolve().parent / "tools" / "repair_db.py")
-        repair_db = importlib.util.module_from_spec(spec)
-        sys.modules["repair_db"] = repair_db     # its dataclasses look themselves up there
-        spec.loader.exec_module(repair_db)
+        # A plain import, not a load-from-path: frozen there is no tools\ folder
+        # on disk to point at, and loading the file by hand also left the module
+        # out of sys.modules under its own name, which its dataclasses need.
+        from tools import repair_db
+
         result = repair_db.repair(say=lambda line: line.strip() and log.info("%s", line))
     except Exception as exc:
         log.exception("repair did not finish")
@@ -293,9 +354,15 @@ def _repair_and_restart() -> int:
     _clear_lock()
     import subprocess
 
+    # Frozen, sys.executable is Mistery.exe and is the whole command: handing it
+    # main.py would make it try to open a file called main.py. From source it is
+    # python.exe and needs the script. No cwd= either way — the new Mistery
+    # inherits ours, and frozen there is no source folder to point it at.
+    command = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        command.append(str(Path(__file__).resolve()))
     try:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
-                         cwd=str(Path(__file__).resolve().parent), close_fds=True)
+        subprocess.Popen([*command, *sys.argv[1:]], close_fds=True)
     except OSError:
         log.exception("could not start Mistery again")
         QMessageBox.information(None, "Library repaired", "Start Mistery again.")
@@ -346,10 +413,20 @@ def _log_art_health() -> None:
 
 
 def main() -> int:
+    # Before anything else: an update may have left a new MisteryUpdate.exe
+    # waiting to be swapped in, and this is the only process that can do it.
+    _swap_in_new_updater()
     _set_windows_app_id()
     from app.log import setup as setup_logging
 
     setup_logging(verbose="--verbose" in sys.argv)
+    # Installed, Mistery is a folder of DLLs with no source to read, so this log
+    # is the only way to answer the two questions a bad install raises: which
+    # mpv did it pick (PATH first, then runtime\ beside the exe), and did the
+    # bundled assets land where the code looks. Costs one shutil.which per start.
+    logging.getLogger("startup").info(
+        "frozen=%s | assets %s | mpv %s",
+        bool(getattr(sys, "frozen", False)), assets_dir(), find_mpv() or "not found")
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

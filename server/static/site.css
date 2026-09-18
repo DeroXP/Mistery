@@ -1,0 +1,319 @@
+/* The landing page's only stylesheet.
+ *
+ * Its own file rather than a <style> block so the Content-Security-Policy can
+ * say style-src 'self' with no 'unsafe-inline' anywhere. It is about 5 KB, it
+ * is cached for a day, and it is the second and last thing the page loads
+ * (the first is the icon). No web fonts: they are a request to someone else's
+ * server before a stranger has decided to trust us, and Windows already has
+ * the typeface the app itself uses.
+ *
+ * The palette is the app's, from app/ui/theme.py - #141414 near-black, one
+ * reserved red #E50914, white for the primary action. In the app red marks the
+ * current page and watch progress and nothing else; here it marks the wordmark
+ * rule and the "new in" pill and nothing else. That restraint is what makes a
+ * dark page read as a product rather than a dark page with a red button on it.
+ */
+
+:root {
+  --bg: #141414;
+  --elev: #181818;
+  --surface: #232323;
+  --border: #2a2a2a;
+  --border-strong: #404040;
+  --text: #ffffff;
+  --dim: #b3b3b3;
+  /* The app's own faint grey is #777777. On a screen you are sitting two feet
+     from, at 15px, that measures 4.3:1 against #141414 - under the 4.5:1 that
+     small text needs. Lifted just enough to clear it, and used only for asides. */
+  --faint: #8c8c8c;
+  --accent: #e50914;
+  --radius: 6px;
+  --gutter: 20px;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  /* Long words break rather than pushing the page sideways. Nothing on a phone
+     should scroll horizontally. */
+  overflow-wrap: break-word;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+               Roboto, Helvetica, Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.6;
+  /* A very slow radial warm-up behind the top of the page, the same trick the
+     app's billboard uses: the artwork bleeds out behind a scrim. */
+  background-image: radial-gradient(1200px 520px at 50% -180px, #1f1f1f 0%, var(--bg) 70%);
+  background-repeat: no-repeat;
+}
+
+img { max-width: 100%; height: auto; }
+
+a { color: var(--text); }
+a:hover { color: var(--dim); }
+
+code {
+  font-family: "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 0.86em;
+  background: var(--surface);
+  border-radius: 4px;
+  padding: 1px 5px;
+  /* A scene filename and a SHA-256 are both one unbreakable "word" as far as a
+     browser is concerned, and on a 390px phone one of them is wider than the
+     screen. `anywhere` lets them break mid-token; without it the whole page
+     gets a horizontal scrollbar, which is the classic way a dark landing page
+     looks broken on a phone. */
+  overflow-wrap: anywhere;
+}
+
+h1, h2, h3 {
+  font-family: "Segoe UI Variable Display", "Segoe UI Semibold", "Segoe UI",
+               system-ui, sans-serif;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  margin: 0 0 12px;
+}
+
+/* --- top bar: 68px, the same height as the app's own --------------------- */
+
+.top {
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-decoration: none;
+  padding-bottom: 4px;
+  border-bottom: 2px solid var(--accent);   /* the app's red underline on the current page */
+}
+
+.brand img { border-radius: 8px; }
+
+.top nav { display: flex; gap: 20px; }
+.top nav a { color: var(--dim); text-decoration: none; font-size: 15px; }
+.top nav a:hover { color: var(--text); }
+
+main { max-width: 1080px; margin: 0 auto; padding: 0 var(--gutter) 40px; }
+
+/* --- hero ---------------------------------------------------------------- */
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 32px;
+  align-items: center;
+  padding: 48px 0 40px;
+}
+
+.hero h1 {
+  font-size: clamp(2rem, 5.2vw, 3.25rem);
+  /* 20ch keeps the headline to three lines at 1280px and two on a wide screen,
+     without letting it run to the full 740px column, where a line that long
+     stops being a headline and starts being a sentence. */
+  max-width: 20ch;
+}
+
+.lede {
+  font-size: clamp(1.05rem, 2.2vw, 1.2rem);
+  color: var(--dim);
+  max-width: 62ch;
+  margin: 0 0 28px;
+}
+
+.hero-mark { display: flex; justify-content: center; }
+.hero-mark img {
+  border-radius: 44px;
+  /* The icon glows amber in the middle; a soft black shadow keeps it sitting on
+     the page instead of floating over it. */
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+/* The primary action is white with black text, exactly as in the app. */
+.download {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #ffffff;
+  color: #000000;
+  text-decoration: none;
+  padding: 14px 28px;
+  border-radius: var(--radius);
+  transition: background-color 120ms linear;
+}
+.download:hover { background: #d9d9d9; color: #000000; }
+.download-main { font-size: 1.15rem; font-weight: 700; line-height: 1.25; }
+.download-sub { font-size: 0.82rem; color: #3a3a3a; line-height: 1.3; }
+
+.download-none {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+}
+.download-none:hover { background: #2c2c2c; color: var(--text); }
+.download-none .download-sub { color: var(--dim); }
+
+/* What Windows will say about an unsigned installer, directly under the button
+   that hands it to you. Not a red warning box: it is not an error, and dressing
+   it as one would make people close the tab. A quiet card, one shade up from the
+   page, the width of a paragraph. */
+.unsigned {
+  background: var(--elev);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--dim);
+  font-size: 0.92rem;
+  line-height: 1.55;
+  max-width: 60ch;
+  margin: 18px 0 0;
+  padding: 14px 16px;
+}
+.unsigned b { color: var(--text); font-weight: 600; }
+.unsigned a { color: var(--text); }
+
+.honest {
+  color: var(--faint);
+  font-size: 0.92rem;
+  max-width: 54ch;
+  margin: 18px 0 0;
+}
+
+.whats-new { font-size: 0.95rem; color: var(--dim); margin: 14px 0 0; max-width: 60ch; }
+
+.pill {
+  display: inline-block;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  padding: 2px 7px;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+/* --- the three things it needs ------------------------------------------- */
+
+.specs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin: 8px 0 56px;
+}
+.specs > div { background: var(--elev); padding: 22px 24px; }
+.specs h3 { font-size: 1.02rem; margin-bottom: 6px; }
+.specs p { margin: 0; color: var(--dim); font-size: 0.93rem; line-height: 1.55; }
+
+/* --- screenshots, when there are any ------------------------------------- */
+
+.shots { margin: 0 0 56px; }
+.shots h2, .features h2, .updates h2 { font-size: clamp(1.4rem, 3vw, 1.9rem); margin-bottom: 20px; }
+
+.shot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 20px;
+}
+.shot-grid figure { margin: 0; }
+.shot-grid img {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: block;
+  background: var(--elev);
+}
+.shot-grid figcaption { color: var(--faint); font-size: 0.85rem; margin-top: 8px; }
+
+/* --- feature cards ------------------------------------------------------- */
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 20px;
+  margin-bottom: 56px;
+}
+.features h2 { grid-column: 1 / -1; margin-bottom: 0; }
+.features article {
+  background: var(--elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+}
+.features h3 { font-size: 1.08rem; margin-bottom: 8px; }
+.features p { margin: 0; color: var(--dim); font-size: 0.95rem; }
+.features b { color: var(--text); font-weight: 600; }
+
+/* --- updates and footer -------------------------------------------------- */
+
+.updates {
+  border-top: 1px solid var(--border);
+  padding-top: 32px;
+  margin-bottom: 40px;
+  max-width: 72ch;
+}
+.updates p { color: var(--dim); }
+.checksum { font-size: 0.9rem; }
+.hash { word-break: break-all; color: var(--dim); }
+
+footer {
+  border-top: 1px solid var(--border);
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px var(--gutter) 48px;
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+footer p { margin: 0 0 6px; }
+footer a { color: var(--dim); }
+footer a:hover { color: var(--text); }
+.quiet { color: var(--faint); }
+
+/* --- phone --------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  :root { --gutter: 16px; }
+  body { font-size: 16px; }
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 24px 0 32px;
+    gap: 24px;
+  }
+  /* The icon goes above the words on a phone: a 220px mark under a headline
+     pushes the Download button below the fold, which is the one thing that
+     must not happen. */
+  .hero-mark { order: -1; justify-content: flex-start; }
+  .hero-mark img { width: 96px; height: 96px; border-radius: 20px; }
+  .hero h1 { max-width: none; }
+  .download { display: flex; align-items: center; text-align: center; }
+  .top { height: 60px; }
+  .top nav { gap: 14px; }
+}
+
+/* Nothing on this page animates, so there is nothing to switch off - but the
+   one hover transition should still not run for someone who asked for less. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}

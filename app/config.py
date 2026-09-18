@@ -6,6 +6,7 @@ import atexit
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -100,8 +101,39 @@ def music_art_dir() -> Path:
     return d
 
 
+def install_dir() -> Path:
+    """The folder Mistery is installed in — from source, the folder main.py is in.
+
+    Frozen, that is where Mistery.exe sits, not sys._MEIPASS: a PyInstaller
+    onedir build keeps its Python payload in _internal\\ beside the exe, and the
+    things we care about here (runtime\\, version.txt, the updater) are beside
+    the exe, not inside the payload.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def runtime_dir() -> Path:
+    """Where the installer puts mpv.exe, ffmpeg.exe and ffprobe.exe.
+
+    Named runtime\\ and not tools\\ on purpose: tools\\ in the source tree holds
+    repair_db.py and the icon maker, and having one name mean two things once
+    cost an afternoon.
+    """
+    return install_dir() / "runtime"
+
+
 def assets_dir() -> Path:
-    """Bundled assets that ship with the source, not user data."""
+    """Bundled assets that ship with the app, not user data.
+
+    Frozen, PyInstaller unpacks them into the payload folder it tells us about
+    through sys._MEIPASS (_internal\\assets in an onedir build); from source
+    they sit beside app\\.
+    """
+    if getattr(sys, "frozen", False):
+        payload = getattr(sys, "_MEIPASS", None)
+        return Path(payload if payload else install_dir()) / "assets"
     return Path(__file__).resolve().parent.parent / "assets"
 
 
@@ -232,9 +264,20 @@ def subprocess_flags(low_priority: bool = False) -> int:
 
 
 def _find_tool(name: str, extra: list[str] | None = None) -> str | None:
+    """mpv, ffmpeg or ffprobe: PATH first, then the copy the installer fetched.
+
+    PATH comes first so that anyone who keeps their own mpv — a newer build, one
+    with their own mpv.conf, one with a different decoder set — keeps using it
+    after installing Mistery. The runtime\\ folder beside the exe is the fallback
+    for a machine that has none, which is every machine the installer just ran
+    on. Installed-in-Program-Files guesses come last: they are guesses.
+    """
     found = shutil.which(name)
     if found:
         return found
+    bundled = runtime_dir() / (f"{name}.exe" if os.name == "nt" else name)
+    if bundled.is_file():
+        return str(bundled)
     for candidate in extra or []:
         if Path(candidate).is_file():
             return candidate
@@ -325,9 +368,11 @@ DEFAULTS: dict = {
     "watched_threshold": 0.92,   # fraction of runtime after which it counts as watched
     "resume_min_seconds": 30,    # don't offer resume for the first N seconds
     "scan_on_startup": True,
-    # Updates. The updater is a separate program that only runs when Mistery
-    # has been closed for half an hour; this is the switch that stops it.
-    "auto_update": True,
+    # No auto_update key here on purpose. Updates are MisteryUpdate.exe's job
+    # and the switch lives in updater.json in the install folder, because the
+    # updater runs on PCs where Mistery has never been opened and this file does
+    # not exist yet. Settings talks to the exe (app/updates.py); a second copy
+    # of the answer in here would only be a copy that could disagree.
 }
 
 

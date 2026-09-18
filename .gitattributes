@@ -1,0 +1,47 @@
+# Line endings. Every text file in this repository is stored with LF — all 77
+# tracked text files already are — and Git converts on the way in and out so a
+# Windows editor can go on writing CRLF without it ever reaching a commit.
+#
+# Without this file the conversion depends on each machine's core.autocrlf, and
+# the first person to clone with it unset commits a file with CRLF in it. Then
+# every later diff of that file is the whole file.
+
+* text=auto
+
+# Files Windows itself reads. cmd.exe parses a .bat line by line and has been
+# known to mis-handle a label or a multi-line block in an LF-only file, and the
+# installer's PowerShell is run by Windows PowerShell 5.1, not pwsh. These are
+# small and Windows-only; give them the endings Windows expects.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Files something other than a human parses, where a stray CR is a bug:
+# GitHub Actions runs the workflow on Linux tooling as well as Windows, and
+# public_key.txt is read as bytes and base64-decoded.
+*.yml                    text eol=lf
+*.yaml                   text eol=lf
+packaging/public_key.txt text eol=lf
+
+# Binary: never convert, never try to diff. icon.ico and icon.png are the two
+# in the tree today; the rest are here so an asset added later is safe by
+# default rather than corrupted by an eol conversion nobody asked for.
+*.ico   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.mp4   binary
+*.mkv   binary
+*.mp3   binary
+*.flac  binary
+*.zip   binary
+*.7z    binary
+*.exe   binary
+*.dll   binary
+*.db    binary

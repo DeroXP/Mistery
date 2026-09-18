@@ -1,0 +1,300 @@
+# Cut a release: build Mistery on a clean Windows machine, sign the update
+# manifest, and put the results on the GitHub Release page.
+#
+#     git tag v1.1.0 && git push origin v1.1.0
+#
+# and twenty minutes later there is an installer people can download and a
+# manifest that tells every installed copy a new version exists. docs/SETUP.md
+# is the full walkthrough, including the one-off setup this needs.
+#
+# The order of the steps is deliberate. The cheap checks that can stop a release
+# run first: the tag against the code takes two seconds, and the signing
+# round-trip takes two more. Both would otherwise fail after a twenty-minute
+# build, and the tag would already be pushed.
+#
+# The signing key is a repository secret and reaches exactly one step. It is
+# never echoed, never written to a file, and never passed as an argument, where
+# it would show up in the process list of a machine we do not own. A workflow
+# log is public if the repository is.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Run it by hand from the Actions tab as well — pick the tag as the ref. Use
+  # this for the first release, with "draft" left on, so the assets can be
+  # looked at before anybody's updater sees them.
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: "Create the release as a draft"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write     # create the Release and upload the assets. Nothing else.
+
+concurrency:
+  # Two runs for one tag would race to create the same release. Queue, do not
+  # cancel: a half-finished upload is worse than a slow one.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Every tool here prints em dashes and the odd accented title. Without
+      # this, Python on a Windows runner encodes stdout as cp1252 and dies on
+      # the first one, halfway through a build, with a UnicodeEncodeError that
+      # has nothing to do with the problem.
+      PYTHONUTF8: "1"
+      # The tag goes through the environment, never inlined into a script. A tag
+      # name can legally contain a quote or a semicolon, and ${{ }} pastes text
+      # straight into the shell.
+      TAG: ${{ github.ref_name }}
+      # Where packaging/build_setup.py leaves the installer, written down once.
+      # Six steps need this path, and when they each carried their own copy five
+      # of them were wrong — packaging/out/MisterySetup.exe, no setup\ segment,
+      # which is PyInstaller's --distpath and not optional. One definition here,
+      # and packaging/test_release.py checks it against build_setup.py itself
+      # before anything is built.
+      INSTALLER: packaging/out/setup/MisterySetup.exe
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          # The tag object itself, so the release notes can use its message.
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: The tag and the code must agree
+        # Two seconds, and it stops the twenty-minute build that would otherwise
+        # produce an installer reporting a version nobody asked for.
+        run: python packaging/check_version.py "$env:TAG"
+
+      - name: Everything this release needs is in the tree
+        run: |
+          $needed = @(
+            "packaging/build_app.py",         # freezes Mistery.exe
+            "packaging/build_updater.py",     # freezes MisteryUpdate.exe
+            "packaging/build_setup.py",       # builds MisterySetup.exe
+            "packaging/make_package.py",      # zips the bundle for the updater
+            "packaging/sign_manifest.py",
+            "packaging/test_signing.py",      # run below, before the build
+            "packaging/test_frozen_paths.py", # run below, after the freeze
+            "packaging/test_release.py",      # run next
+            "packaging/public_key.txt"        # written by packaging/make_key.py
+          )
+          $missing = $needed | Where-Object { -not (Test-Path $_) }
+          if ($missing) {
+            Write-Host "::error::this release cannot be built: $($missing -join ', ')"
+            if ($missing -contains "packaging/public_key.txt") {
+              Write-Host "::error::run packaging/make_key.py once and commit public_key.txt - docs/SETUP.md step 3"
+            }
+            exit 1
+          }
+
+      - name: This workflow and the build scripts still mean the same files
+        # A second's worth of reading, against the twenty minutes it costs to
+        # find out at the size check that a path in here is one folder off.
+        # It compares every packaging path this file names with what the build
+        # scripts actually produce, and the same for the two documents that tell
+        # people how to build it by hand.
+        run: python packaging/test_release.py
+
+      - name: Install the app's dependencies and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: The signer and both verifiers still agree
+        # A throwaway key, a real manifest, and every verifier in the repository
+        # asked to accept it and then to refuse eleven tampered copies. If the
+        # three implementations have drifted apart, this is where a release
+        # stops — before anything is built and long before anything is uploaded.
+        run: python packaging/test_signing.py
+
+      - name: Freeze the app
+        run: python packaging/build_app.py
+
+      - name: The frozen build can still find its own files
+        # In-process checks of the path logic that changes meaning when frozen:
+        # where assets live, where the runtime folder is, how the app restarts
+        # itself. No window, nothing installed. Seconds, and it catches the
+        # class of bug that only shows up after PyInstaller has been near it.
+        run: python packaging/test_frozen_paths.py
+
+      - name: Freeze the updater
+        run: python packaging/build_updater.py
+
+      - name: Zip the bundle the updater downloads
+        run: python packaging/make_package.py
+
+      - name: Build MisterySetup.exe
+        run: python packaging/build_setup.py
+
+      - name: Name the files
+        id: names
+        run: |
+          $version = python packaging/check_version.py
+          $package = python packaging/make_package.py --print-name
+          "version=$version"                     >> $env:GITHUB_OUTPUT
+          "package=$package"                     >> $env:GITHUB_OUTPUT
+          "package_path=packaging/out/$package"  >> $env:GITHUB_OUTPUT
+
+      - name: The build produced what it said it would
+        run: |
+          $files = @(
+            "${{ steps.names.outputs.package_path }}",
+            $env:INSTALLER
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error::$file was not built"
+              exit 1
+            }
+            $size = (Get-Item $file).Length
+            Write-Host ("{0,-46} {1,8:N1} MB" -f $file, ($size / 1MB))
+            if ($size -lt 1MB) {
+              Write-Host "::error::$file is only $size bytes - that is not a build, that is a stub"
+              exit 1
+            }
+          }
+
+      - name: Sign the update manifest
+        env:
+          # The only step the key is visible to. Read straight out of the
+          # environment by sign_manifest.py, so it never lands in a file.
+          MISTERY_SIGNING_KEY: ${{ secrets.MISTERY_SIGNING_KEY }}
+        run: |
+          if (-not $env:MISTERY_SIGNING_KEY) {
+            Write-Host "::error::the repository secret MISTERY_SIGNING_KEY is not set - docs/SETUP.md step 4"
+            exit 1
+          }
+          # The first line of the tag's own message becomes the line the updater
+          # shows people. An unannotated tag has none, and the version does.
+          $note = git for-each-ref "refs/tags/$env:TAG" --format='%(contents:subject)'
+          if (-not $note) { $note = "Mistery ${{ steps.names.outputs.version }}" }
+          Write-Host "release note: $note"
+          # Through a file, not an argument: a tag message can hold a quote or an
+          # ampersand, and those are the characters that turn one argument into
+          # two somewhere between here and Python.
+          [IO.File]::WriteAllText((Join-Path $PWD "packaging/out/release-note.txt"),
+                                  $note, (New-Object Text.UTF8Encoding $false))
+          python packaging/sign_manifest.py `
+            --version    "${{ steps.names.outputs.version }}" `
+            --package    "${{ steps.names.outputs.package_path }}" `
+            --installer  "$env:INSTALLER" `
+            --base-url   "${{ github.server_url }}/${{ github.repository }}/releases/download/$env:TAG" `
+            --notes-file "packaging/out/release-note.txt" `
+            --out        "packaging/out/mistery-update.json"
+
+      - name: Check the manifest again, with the public key alone
+        # Same check an installed updater will do, run here with no secret in
+        # the environment at all: whatever happens next, this file verifies.
+        run: python packaging/sign_manifest.py --verify packaging/out/mistery-update.json
+
+      - name: Write the checksums people can compare against
+        run: |
+          $lines = foreach ($file in @(
+              "${{ steps.names.outputs.package_path }}",
+              $env:INSTALLER,
+              "packaging/out/mistery-update.json")) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $(Split-Path $file -Leaf)"
+          }
+          # LF and no BOM, so `sha256sum -c` on any machine reads it.
+          # Join-Path $PWD because [IO.File] resolves a relative path against
+          # the .NET process directory, which is not PowerShell's location.
+          [IO.File]::WriteAllText((Join-Path $PWD "packaging/out/SHA256SUMS.txt"),
+                                  ($lines -join "`n") + "`n",
+                                  (New-Object Text.UTF8Encoding $false))
+          Get-Content packaging/out/SHA256SUMS.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          $version = "${{ steps.names.outputs.version }}"
+          # Built as a list of lines rather than a here-string: a here-string
+          # has to close at column zero, which is not a thing that survives
+          # being pasted around inside a YAML block.
+          $notes = @(
+            "Mistery $version for Windows 11."
+            ""
+            'Download **MisterySetup.exe** and run it. It installs for you only, under'
+            '`%LOCALAPPDATA%\Programs\Mistery` - no administrator prompt - and fetches'
+            'mpv and ffmpeg from their own projects while it runs. About 425 MB on disk'
+            'when it is done: 179 MB of app and updater, 254 MB of mpv and ffmpeg, and an'
+            '11 MB uninstaller. Measured from the 1.0.0 build.'
+            ""
+            'Windows SmartScreen will warn about an unrecognised app, because this'
+            'installer is not code-signed. Choose *More info* then *Run anyway* if you'
+            'trust where you got it from, and compare the SHA-256 below with the file'
+            'you downloaded.'
+            ""
+            "The zip is what an installed copy downloads for itself when it updates, and"
+            '`mistery-update.json` is the signed manifest that describes it. Installed'
+            'copies refuse anything not signed by the release key, so both are here for'
+            'the updater rather than for people.'
+            ""
+            '```'
+          )
+          $notes += (Get-Content packaging/out/SHA256SUMS.txt)
+          $notes += '```'
+          [IO.File]::WriteAllText((Join-Path $PWD "release-notes.md"),
+                                  ($notes -join "`n") + "`n",
+                                  (New-Object Text.UTF8Encoding $false))
+
+          $assets = @(
+            "${{ steps.names.outputs.package_path }}",
+            $env:INSTALLER,
+            "packaging/out/mistery-update.json",
+            "packaging/out/SHA256SUMS.txt"
+          )
+          # A re-run after a failed upload should finish the job rather than stop
+          # on "a release with that tag already exists". Asking `gh release list`
+          # rather than `gh release view` keeps this to one command that exits 0
+          # either way, so nothing has to redirect a native program's stderr.
+          $existing = gh release list --limit 100 --json tagName --jq '.[].tagName'
+          if ($existing -contains $env:TAG) {
+            Write-Host "release $env:TAG is already there - replacing its files"
+            gh release edit "$env:TAG" --title "Mistery $version" --notes-file release-notes.md
+            gh release upload "$env:TAG" $assets --clobber
+          } else {
+            $flags = @("--title", "Mistery $version", "--notes-file", "release-notes.md")
+            if ($env:DRAFT -eq "true") { $flags += "--draft" }
+            gh release create "$env:TAG" $flags $assets
+          }
+          $where = "${{ github.server_url }}/${{ github.repository }}/releases/tag/$env:TAG"
+          Write-Host "::notice::released $env:TAG - $where"
+
+      - name: Keep the installer for a fortnight even if the release failed
+        # The build is twenty minutes. If the upload is what broke, the files
+        # are still here rather than gone with the runner.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mistery-release-${{ github.ref_name }}
+          path: |
+            ${{ env.INSTALLER }}
+            packaging/out/Mistery-*-win64.zip
+            packaging/out/mistery-update.json
+            packaging/out/SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 14

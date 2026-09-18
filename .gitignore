@@ -12,3 +12,7 @@ signing/
 # Local build output
 packaging/out/
 packaging/tools-cache/
+
+# Build output and test scratch
+packaging/out/
+packaging/tools-cache/

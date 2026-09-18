@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .. import __version__, db, vr
+from .. import __version__, db, updates, vr
 from ..discord_presence import DiscordPresence
 from ..config import find_ffmpeg, find_ffprobe, find_mpv, settings
 from ..metadata.tmdb import TmdbClient
@@ -33,6 +33,21 @@ def _saver_after() -> int:
     except (TypeError, ValueError):
         value = 180
     return max(10, min(3600, value))
+
+
+def _checked_when(answer: dict) -> str:
+    """The "Checked 17 Sep, 20:41." tail for an update line, or nothing.
+
+    The updater stamps every answer it writes, so an answer with no stamp is one
+    this session failed to get — and dating that would be a lie.
+    """
+    try:
+        when = float(answer.get("checked", 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if when <= 0:
+        return ""
+    return " Checked " + time.strftime("%d %b, %H:%M", time.localtime(when)) + "."
 
 
 def _section(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
@@ -63,11 +78,15 @@ class SettingsView(QWidget):
     # Discord art export), carried back to the UI thread.
     _tmdb_checked = Signal(bool, str)
     _art_exported = Signal(str, int, int, str)
+    _update_checked = Signal(object)        # what MisteryUpdate.exe --check-now found
+    _update_switched = Signal(bool)         # whether the on/off switch was written
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._tmdb_checked.connect(self._on_tmdb_checked)
         self._art_exported.connect(self._on_art_exported)
+        self._update_checked.connect(self._on_update_checked)
+        self._update_switched.connect(self._on_update_switched)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
@@ -961,7 +980,116 @@ class SettingsView(QWidget):
         self._about.setWordWrap(True)
         self._about.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self._about)
+        self._build_updates(layout)
         return card
+
+    def _build_updates(self, layout: QVBoxLayout) -> None:
+        """The update switch and Check now — on installed copies only.
+
+        Run from source there is no MisteryUpdate.exe beside main.py to talk to,
+        so nothing is drawn: a switch that writes a setting no program reads is
+        worse than no switch. app/updates.py is the only thing here that knows
+        the updater exists, and updater.json in the install folder is the one
+        place the answer is kept — not settings.json, because the updater has to
+        work on a PC where Mistery has never been opened.
+        """
+        self._auto_update = None
+        if updates.updater_exe() is None:
+            return
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+        self._auto_update = QCheckBox("Keep Mistery up to date")
+        self._auto_update.toggled.connect(self._on_auto_update)
+        self._check_updates = QPushButton("Check now")
+        self._check_updates.clicked.connect(self._check_for_updates)
+        row.addWidget(self._auto_update)
+        row.addStretch(1)
+        row.addWidget(self._check_updates)
+        holder = QWidget()
+        holder.setLayout(row)
+        layout.addWidget(holder)
+
+        self._update_status = QLabel()
+        self._update_status.setObjectName("Faint")
+        self._update_status.setWordWrap(True)
+        layout.addWidget(self._update_status)
+        self._reload_updates()
+
+    def _reload_updates(self) -> None:
+        """Put the switch and the line under it back in step with updater.json."""
+        if self._auto_update is None:
+            return
+        on = updates.auto_update_enabled()
+        self._auto_update.blockSignals(True)
+        self._auto_update.setChecked(on)
+        self._auto_update.blockSignals(False)
+        self._auto_update.setEnabled(True)
+        # Off means off: the updater refuses --check-now as well, rather than
+        # reaching out because a button was pressed. So the button goes too.
+        self._check_updates.setEnabled(on)
+        if not on:
+            self._update_status.setText(
+                "Mistery will not contact the update server while this is off. "
+                "Updates are installed only when Mistery has been closed for "
+                "half an hour, and never ask for an administrator.")
+            return
+        answer = updates.last_check()
+        if not answer:
+            self._update_status.setText(
+                "Checked once an hour in the background. An update installs "
+                "itself only after Mistery has been closed for half an hour.")
+            return
+        self._update_status.setText(updates.describe(answer) + _checked_when(answer))
+
+    def _on_auto_update(self, on: bool) -> None:
+        """Tell MisteryUpdate.exe, on a thread: it is a process start (0.2 s
+        measured, but a first run past an antivirus scan is not), and the
+        settings screen freezing on a checkbox is the sort of thing people
+        remember. The controls stay off until it answers."""
+        self._auto_update.setEnabled(False)
+        self._check_updates.setEnabled(False)
+        self._update_status.setText("Turning updates on…" if on else "Turning updates off…")
+
+        def switch() -> None:
+            told = updates.set_auto_update(on)
+            try:
+                self._update_switched.emit(told)
+            except RuntimeError:
+                pass                    # the window is already gone
+
+        threading.Thread(target=switch, name="update-switch", daemon=True).start()
+
+    def _on_update_switched(self, told: bool) -> None:
+        # _reload_updates re-reads updater.json, so the box shows what is in the
+        # file rather than what was clicked — if the write failed it goes back.
+        self._reload_updates()
+        if not told:
+            self._update_status.setText(
+                f"<span style='color:{C.DANGER}'>Could not reach MisteryUpdate.exe, "
+                "so the setting was not changed.</span>")
+
+    def _check_for_updates(self) -> None:
+        # The switch goes off too while this runs: turning updates off half way
+        # through a check would leave the answer contradicting the checkbox.
+        self._auto_update.setEnabled(False)
+        self._check_updates.setEnabled(False)
+        self._update_status.setText("Checking…")
+
+        def ask() -> None:
+            answer = updates.check_now()
+            try:
+                self._update_checked.emit(answer)
+            except RuntimeError:
+                pass                    # the window is already gone
+
+        threading.Thread(target=ask, name="update-check", daemon=True).start()
+
+    def _on_update_checked(self, answer: dict) -> None:
+        self._auto_update.setEnabled(True)
+        self._check_updates.setEnabled(True)
+        self._update_status.setText(updates.describe(answer) + _checked_when(answer))
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -997,6 +1125,7 @@ class SettingsView(QWidget):
         self._reload_playback_toggles()
         self._reload_sound()
         self._reload_music()
+        self._reload_updates()
 
         failed = db.failed_count()
         self._retry.setEnabled(bool(failed))

@@ -1,0 +1,31 @@
+# What the Railway service installs. Three direct dependencies; the rest are
+# theirs. Every version is pinned, including the indirect ones, so a deploy in
+# six months installs the same bytes as the deploy that was tested - a web
+# service that quietly picks up a new minor version of its framework is a
+# service that breaks on a Tuesday for no reason anybody can see.
+#
+# Checked by installing this file into an empty Python 3.12 environment:
+# 16 packages, 30 MB on disk (pip, not the container image).
+#
+# Note what is NOT here: nothing for cryptography (server/signing.py verifies
+# Ed25519 with the standard library alone), nothing for a database, nothing for
+# sessions, nothing for metrics. This service stores nothing about anybody.
+
+fastapi==0.120.4
+uvicorn==0.41.0
+httpx==0.28.1
+
+# --- pulled in by those three; pinned so the build is reproducible ----------
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+h11==0.16.0
+httpcore==1.0.9
+idna==3.20
+pydantic==2.13.5
+pydantic_core==2.46.5
+starlette==0.49.3
+typing-inspection==0.4.4
+typing_extensions==4.16.0
