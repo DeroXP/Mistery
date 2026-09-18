@@ -237,6 +237,11 @@ service's root directory, so the one setting that matters is the root.
    | `MISTERY_REPO` | `DeroXP/Mistery` |
    | `MISTERY_SITE_URL` | your public URL, once you know it (optional) |
 
+   `MISTERY_SITE_URL` takes `mistery.up.railway.app` or
+   `https://mistery.up.railway.app` — the bare domain Railway shows you is
+   read as https. An explicit `http://` is still refused, because this
+   service is only ever reached over https.
+
    Everything else has a default that works: the manifest URL is
    `https://github.com/DeroXP/Mistery/releases/latest/download/mistery-update.json`,
    the cache is 5 minutes, the rate limit is 60 requests an hour per address.

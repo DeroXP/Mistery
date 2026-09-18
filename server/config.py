@@ -103,8 +103,18 @@ def load(env: dict | None = None) -> Config:
         # canonical link and the Open Graph tags are right with no variable set.
         domain = env.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
         site_url = f"https://{domain}" if domain else ""
+    if site_url and "://" not in site_url:
+        # A bare domain is what Railway shows you on its own Networking page, so
+        # it is what people paste. Reading it as https is not a guess: this
+        # service is only ever reached over https, and the alternative was
+        # refusing to start over a missing prefix, which is what happened.
+        site_url = f"https://{site_url}"
     if site_url and not site_url.startswith("https://"):
-        raise ConfigurationError(f"MISTERY_SITE_URL must be https, got {site_url!r}")
+        raise ConfigurationError(
+            f"MISTERY_SITE_URL must be https, got {site_url!r}.\n"
+            f"  Drop the http:// and let it be https://, or unset the variable:\n"
+            f"  with no value it uses the domain Railway already tells the service about."
+        )
 
     # Kept exactly as it was pasted, trailing newline and all. This service's
     # one promise about the manifest is that it repeats bytes rather than
