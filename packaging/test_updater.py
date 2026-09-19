@@ -36,6 +36,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import shutil
 import ssl
 import subprocess
@@ -103,8 +104,15 @@ def build_source_copy(src: Path, public_key_b64: str, version: str) -> None:
 
     keys_file = src / "updater" / "keys.py"
     text = keys_file.read_text(encoding="utf-8")
-    text = text.replace('UPDATE_PUBLIC_KEY = ""',
-                        f'UPDATE_PUBLIC_KEY = "{public_key_b64}"')
+    # Whatever key is there, empty or the real release key, this copy's updater
+    # must trust the throwaway one. Replacing only the empty assignment stopped
+    # matching the day the real key went in, and build_updater.py then refused,
+    # rightly, an updater that would have rejected every update the test offers.
+    text, swapped = re.subn(r'^UPDATE_PUBLIC_KEY = "[^"]*"',
+                            f'UPDATE_PUBLIC_KEY = "{public_key_b64}"', text,
+                            count=1, flags=re.M)
+    if swapped != 1:
+        raise SystemExit("updater/keys.py has no UPDATE_PUBLIC_KEY line to point at the test key")
     keys_file.write_text(text, encoding="utf-8")
     (src / "packaging" / "public_key.txt").write_text(public_key_b64 + "\n",
                                                       encoding="utf-8")

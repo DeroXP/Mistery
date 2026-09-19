@@ -8,8 +8,8 @@ installer copies into %LOCALAPPDATA%\\Programs\\Mistery.
 
 Two choices worth knowing about:
 
-onedir, never onefile. This build is 171.0 MB in 231 files (measured, version
-1.0.0), 93 MB of it Qt. A onefile exe would unpack all of that into %TEMP% on
+onedir, never onefile. This build is 181.7 MB in 243 files (measured, version
+1.2.0), 93 MB of it Qt. A onefile exe would unpack all of that into %TEMP% on
 every single start and delete it again on exit, so every launch pays for it.
 Worse for us: the updater replaces files in place, and there are no files
 inside a onefile exe to replace.
@@ -49,7 +49,7 @@ APP_NAME = "Mistery"
 # The app imports these at startup or on its first music page. PyInstaller
 # reports a missing one as a warning halfway through a five-minute build and
 # then ships a bundle that dies on launch, so check first and say so plainly.
-REQUIRED_MODULES = ("PySide6", "PIL", "requests", "mutagen", "numpy")
+REQUIRED_MODULES = ("PySide6", "PIL", "requests", "mutagen", "numpy", "cryptography")
 
 # Imported inside a function (main._repair_and_restart), which PyInstaller does
 # find on its own — named here so a future refactor of that import cannot
@@ -59,12 +59,23 @@ HIDDEN_IMPORTS = ("tools.repair_db",)
 # tkinter is 8 MB of Tcl/Tk for a GUI toolkit the app does not use. (The
 # installer does use it — that is a separate build.)
 #
-# cryptography is the surprising one. Nothing in Mistery imports it, but
-# requests/__init__.py imports it inside a try/except to print a version in its
-# bug reports, and PyInstaller follows that import: 9.5 MB of package, most of
-# it one _rust.pyd, measured in the build before this line existed. requests
-# catches the ImportError and carries on, so leaving it out costs nothing.
-EXCLUDED_MODULES = ("tkinter", "test", "pydoc_data", "cryptography")
+# cryptography was excluded here until 1.2.0, when nothing in Mistery used it
+# (9.5 MB, most of it one _rust.pyd). Movie night makes each session's TLS
+# certificate with it, so it ships now, and check_movie_night() below proves it
+# is in the bundle: a bundle without it starts fine and fails only when a host
+# presses Start movie night, on a PC where nobody can see why.
+EXCLUDED_MODULES = ("tkinter", "test", "pydoc_data")
+
+# What movie night needs, looked for inside the finished exe rather than trusted
+# to PyInstaller's analysis. Every one is imported at the top of a module, so
+# the analysis does find them today; this is here for the day a refactor moves
+# an import into a function behind a string, or someone excludes a package again.
+MOVIE_NIGHT_MODULES = (
+    "app.party.session", "app.party.server", "app.party.sync", "app.party.tls",
+    "app.party.invite", "app.party.upnp", "app.party.stun", "app.party.guest_proxy",
+    "app.party.transcode", "app.party.people", "app.ui.party_dialog",
+    "cryptography.x509", "cryptography.hazmat.primitives.asymmetric.ec", "ssl",
+)
 
 
 def app_version() -> str:
@@ -179,6 +190,30 @@ def exe_file_version(exe: Path) -> str | None:
     return ctypes.wstring_at(value.value, length.value).rstrip("\0")
 
 
+def modules_in_exe(exe: Path) -> set[str]:
+    """The pure-Python modules frozen into the exe's PYZ archive, read back out
+    of the exe with PyInstaller's own reader (825 of them in the 1.1.0 build)."""
+    from PyInstaller.archive.readers import CArchiveReader
+
+    archive = CArchiveReader(str(exe))
+    pyz = next(name for name in archive.toc if name.endswith(".pyz"))
+    return set(archive.open_embedded_archive(pyz).toc)
+
+
+def check_movie_night(bundle: Path, exe: Path) -> int:
+    """Raise unless everything movie night needs is in the bundle. Returns how
+    many modules were checked, for the report."""
+    frozen = modules_in_exe(exe)
+    missing = [name for name in MOVIE_NIGHT_MODULES if name not in frozen]
+    # cryptography's compiled half, OpenSSL included, is one file beside the exe.
+    rust = bundle / "_internal" / "cryptography" / "hazmat" / "bindings" / "_rust.pyd"
+    if not rust.is_file():
+        missing.append(str(rust.relative_to(bundle)))
+    if missing:
+        raise SystemExit("the build is missing what movie night needs: " + ", ".join(missing))
+    return len(MOVIE_NIGHT_MODULES)
+
+
 def folder_size(folder: Path) -> tuple[int, int]:
     """(bytes, files) under a folder, for the build report."""
     total = files = 0
@@ -257,6 +292,7 @@ def build(out_root: Path, keep_work: bool = False) -> Path:
     stamped = exe_file_version(exe)
     if os.name == "nt" and stamped != version:
         raise SystemExit(f"{exe.name} reports FileVersion {stamped!r}, not {version!r}")
+    party_checked = check_movie_night(bundle, exe)
 
     if not keep_work:
         shutil.rmtree(work, ignore_errors=True)
@@ -268,6 +304,7 @@ def build(out_root: Path, keep_work: bool = False) -> Path:
     print(f"  version          {version} (exe resource says {stamped}, version.txt agrees)")
     print(f"  icon             _internal\\assets\\icon.ico, "
           f"{icon_in_bundle.stat().st_size / 1024:.0f} KB")
+    print(f"  movie night      {party_checked} modules found in the exe, and cryptography's _rust.pyd")
     print(f"  built in         {took:.0f} s")
     return bundle
 

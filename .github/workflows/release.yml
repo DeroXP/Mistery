@@ -239,9 +239,9 @@ jobs:
             ""
             'Download **MisterySetup.exe** and run it. It installs for you only, under'
             '`%LOCALAPPDATA%\Programs\Mistery` - no administrator prompt - and fetches'
-            'mpv and ffmpeg from their own projects while it runs. About 425 MB on disk'
-            'when it is done: 179 MB of app and updater, 254 MB of mpv and ffmpeg, and an'
-            '11 MB uninstaller. Measured from the 1.0.0 build.'
+            'mpv and ffmpeg from their own projects while it runs. About 435 MB on disk'
+            'when it is done: 190 MB of app and updater, 254 MB of mpv and ffmpeg, and an'
+            '11 MB uninstaller. Measured from the 1.2.0 build.'
             ""
             'Windows SmartScreen will warn about an unrecognised app, because this'
             'installer is not code-signed. Choose *More info* then *Run anyway* if you'

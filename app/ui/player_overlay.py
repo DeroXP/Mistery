@@ -14,8 +14,8 @@ from PySide6.QtCore import (
     QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal,
 )  # noqa: F401  (QRect is used by the Up Next snapshot)
 from PySide6.QtGui import (
-    QAction, QActionGroup, QColor, QCursor, QImage, QLinearGradient, QPainter,
-    QPen, QPixmap,
+    QAction, QActionGroup, QColor, QCursor, QGuiApplication, QImage, QLinearGradient,
+    QPainter, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy,
@@ -448,6 +448,145 @@ class NextUpCard(QWidget):
         painter.drawRoundedRect(rect, 12, 12)
 
 
+# The overlay is a window of its own, outside the main window's stylesheet, so
+# what it draws carries its own look (as SkipPill does).
+_CARD_BUTTONS = f"""
+    QPushButton#Primary {{
+        background: {C.PLAY_BG}; color: {C.PLAY_FG}; border: none; border-radius: 5px;
+        font-size: 10pt; font-weight: 700; padding: 8px 18px;
+    }}
+    QPushButton#Primary:hover {{ background: {C.PLAY_BG_HOVER}; }}
+    QPushButton#Ghost {{
+        background: rgba(109, 109, 110, 0.35); color: {C.TEXT}; border: none;
+        border-radius: 5px; font-size: 10pt; font-weight: 600; padding: 8px 18px;
+    }}
+    QPushButton#Ghost:hover {{ background: rgba(109, 109, 110, 0.55); }}
+"""
+
+
+class PartyPill(QPushButton):
+    """The top bar's movie night pill.
+
+    On a film or episode of your own that is playing: "Watch together", which
+    asks for a movie night to be started with it. While one runs: "Movie night
+    · 3", red dot and all, and a click lists who is watching, with the invite
+    to copy (the host) and the way out.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._live = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(10, 12, 16, 0.72);
+                border: 1px solid rgba(255, 255, 255, 0.28);
+                border-radius: 15px;
+                color: {C.TEXT};
+                font-size: 9.5pt;
+                font-weight: 600;
+                padding: 6px 14px 6px 27px;
+            }}
+            QPushButton:hover {{
+                background: rgba(44, 46, 52, 0.92);
+                border-color: rgba(255, 255, 255, 0.5);
+            }}
+        """)
+        self.setVisible(False)
+
+    @property
+    def live(self) -> bool:
+        return self._live
+
+    def set_live(self, live: bool, text: str, tooltip: str) -> None:
+        self._live = bool(live)
+        self.setText(text)
+        self.setToolTip(tooltip)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(C.ACCENT) if self._live else QColor(C.TEXT_DIM))
+        radius = 3.6
+        painter.drawEllipse(QRectF(14 - radius, self.height() / 2 - radius, radius * 2, radius * 2))
+
+
+class PartyCard(QWidget):
+    """A movie night's question over the picture: the host's Next episode
+    together, a guest's offer of a lighter stream. No countdown: in a movie
+    night nothing moves everyone on by itself."""
+
+    accepted = Signal(str)      # the card's kind: "next", "quality:1080p", …
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._kind = ""
+        self.setVisible(False)
+        self.setStyleSheet(_CARD_BUTTONS)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(6)
+        self._eyebrow = QLabel()
+        self._eyebrow.setStyleSheet(
+            f"color: {C.ACCENT}; font-size: 8.5pt; font-weight: 700; letter-spacing: 1.4px;"
+        )
+        layout.addWidget(self._eyebrow)
+        self._title = QLabel()
+        self._title.setWordWrap(True)
+        self._title.setMaximumWidth(300)
+        self._title.setStyleSheet(f"color: {C.TEXT}; font-size: 12pt; font-weight: 600;")
+        layout.addWidget(self._title)
+        layout.addSpacing(8)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(9)
+        self._accept = QPushButton()
+        self._accept.setObjectName("Primary")
+        self._accept.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._accept.clicked.connect(self._on_accept)
+        buttons.addWidget(self._accept)
+        self._dismiss = QPushButton()
+        self._dismiss.setObjectName("Ghost")
+        self._dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dismiss.clicked.connect(self.dismiss)
+        buttons.addWidget(self._dismiss)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+    @property
+    def kind(self) -> str:
+        return self._kind if self.isVisible() else ""
+
+    def present(self, kind: str, eyebrow: str, title: str, accept: str, dismiss: str) -> None:
+        self._kind = kind
+        self._eyebrow.setText(eyebrow)
+        self._title.setText(elide(title, 90))
+        self._accept.setText(accept)
+        self._dismiss.setText(dismiss)
+        self.setVisible(True)
+        self.adjustSize()
+        self.raise_()
+
+    def dismiss(self) -> None:
+        self.setVisible(False)
+
+    def _on_accept(self) -> None:
+        kind = self._kind
+        self.setVisible(False)
+        self.accepted.emit(kind)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        painter.setBrush(QColor(10, 12, 16, 235))
+        painter.drawRoundedRect(rect, 12, 12)
+
+
 class PlayerOverlay(QWidget):
     """Transport chrome. Lives in its own window above the mpv surface."""
 
@@ -473,6 +612,14 @@ class PlayerOverlay(QWidget):
     # "skip_now" | "auto_toggle" | "intro_start" | "intro_end" | "intro_clear"
     # | "credits_here" | "credits_clear"
     tv_action = Signal(str)
+    # Movie night: "Watch together" (start one with what is playing), the host's
+    # panel, End or Leave from the pill's menu, a guest's own stream quality
+    # (original | 1080p | 720p), and a card's button ("next", "quality:<q>").
+    party_requested = Signal()
+    party_panel_requested = Signal()
+    party_leave_requested = Signal()
+    stream_quality_selected = Signal(str)
+    party_card_accepted = Signal(str)
 
     def __init__(self, parent=None, owner: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -500,6 +647,9 @@ class PlayerOverlay(QWidget):
         self._speed = 1.0
         self._quality = "balanced"
         self._source_size = ""
+        # The movie night this player is in, as PlayerView describes it
+        # (set_party), or None.
+        self._party: dict | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -526,6 +676,9 @@ class PlayerOverlay(QWidget):
         titles.addWidget(self._subtitle)
         top_layout.addLayout(titles)
         top_layout.addStretch(1)
+        self._party_pill = PartyPill()
+        self._party_pill.clicked.connect(self._on_party_pill)
+        top_layout.addWidget(self._party_pill, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(self._top)
 
         root.addStretch(1)
@@ -674,6 +827,25 @@ class PlayerOverlay(QWidget):
         self._message_timer.setSingleShot(True)
         self._message_timer.timeout.connect(self.clear_message)
 
+        # A movie night's news: "Sam paused", "Alex joined", "Waiting for Sam…".
+        # A line near the top rather than the middle of the picture, and it stays
+        # when the controls hide: what the room did is worth seeing mid-film.
+        self._notice = QLabel(self)
+        self._notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._notice.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._notice.setStyleSheet(f"""
+            color: {C.TEXT}; font-size: 10.5pt; font-weight: 600;
+            background: rgba(10, 12, 16, 0.84); border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 15px; padding: 7px 18px;
+        """)
+        self._notice.setVisible(False)
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.timeout.connect(self.clear_notice)
+
+        self.party_card = PartyCard(self)
+        self.party_card.accepted.connect(self.party_card_accepted.emit)
+
         self._tv_state = {"has_intro": False, "has_credits": False, "auto": True}
 
         self._hide_timer = QTimer(self)
@@ -737,7 +909,7 @@ class PlayerOverlay(QWidget):
         self._place_floaters()
         # The pill and Up Next card stay: they are exactly what you want
         # visible while leaning back with the controls hidden.
-        if self.next_card.isVisible() or self.skip_pill.isVisible():
+        if self.next_card.isVisible() or self.skip_pill.isVisible() or self.party_card.isVisible():
             self.unsetCursor()
         else:
             self.setCursor(Qt.CursorShape.BlankCursor)
@@ -820,7 +992,9 @@ class PlayerOverlay(QWidget):
                                 (self._next_episode, has_next)):
             button.setVisible(is_episode)
             button.setEnabled(enabled)
-        self._autoplay.setVisible(is_episode)
+        # Autoplay stays out of a movie night: what comes next is the host's to
+        # put on, for everyone, never a countdown's.
+        self._autoplay.setVisible(is_episode and self._party is None)
 
     def set_autoplay(self, enabled: bool) -> None:
         self._autoplay.blockSignals(True)
@@ -866,6 +1040,119 @@ class PlayerOverlay(QWidget):
         self._message.setVisible(False)
         self._message.clear()
 
+    # --- movie night ---------------------------------------------------------
+
+    def set_party(self, info: dict | None, can_start: bool = False, over: bool = False) -> None:
+        """The movie night this player is in, or None.
+
+        info: {"role": "host" | "guest", "people": [{"id", "name", "host",
+        "buffering"}], "me": this person's id, "code", "link" (the host's
+        invite), "quality" (a guest's stream), "transcode" (the host can make
+        1080p and 720p), "panel" (something shows the host's panel)}.
+        can_start: outside one, whether "Watch together" is offered.
+        over: the title on screen was a movie night's, and that is over: still
+        nothing to choose a speed for.
+        """
+        self._party = info
+        pill = self._party_pill
+        if info is None:
+            pill.set_live(False, "Watch together",
+                          "Start a movie night with this: friends with Mistery watch it with you, in sync")
+            pill.setVisible(can_start)
+        else:
+            count = len(info.get("people") or [])
+            pill.set_live(True, f"Movie night · {count}" if count else "Movie night",
+                          "Who is watching, and the invite" if info.get("role") == "host"
+                          else "Who is watching")
+            pill.setVisible(True)
+        # The speed is the room's: the follower nudges it to keep this player in
+        # step, and a choice here would only be undone.
+        self._speed_button.setVisible(info is None and not over)
+        if info is not None:
+            self._autoplay.setVisible(False)
+            together = info.get("role") == "host"
+            self._next_episode.setToolTip("Next episode together  (N)" if together else "Next episode  (N)")
+            self._prev_episode.setToolTip("Previous episode together  (P)" if together
+                                          else "Previous episode  (P)")
+        else:
+            self._next_episode.setToolTip("Next episode  (N)")
+            self._prev_episode.setToolTip("Previous episode  (P)")
+
+    @property
+    def party_info(self) -> dict | None:
+        return self._party
+
+    def show_notice(self, text: str, timeout_ms: int = 3500) -> None:
+        """A movie night line near the top of the picture; timeout_ms=0 keeps it up."""
+        self._notice.setText(text)
+        self._notice.setVisible(bool(text))
+        self._place_floaters()
+        self._notice.raise_()
+        if text and timeout_ms > 0:
+            self._notice_timer.start(timeout_ms)
+        else:
+            self._notice_timer.stop()
+
+    def clear_notice(self) -> None:
+        self._notice_timer.stop()
+        self._notice.setVisible(False)
+        self._notice.clear()
+
+    @property
+    def notice_text(self) -> str:
+        return self._notice.text() if self._notice.isVisible() else ""
+
+    def present_party_card(self, kind: str, eyebrow: str, title: str, accept: str,
+                           dismiss: str) -> None:
+        self.party_card.present(kind, eyebrow, title, accept, dismiss)
+        self._place_floaters()
+
+    def hide_party_card(self) -> None:
+        self.party_card.dismiss()
+
+    def _on_party_pill(self) -> None:
+        if self._party is None:
+            self.party_requested.emit()
+            return
+        self._popup(self.party_menu(), self._party_pill, below=True)
+
+    def party_menu(self) -> QMenu:
+        """Who is watching, the host's invite to copy, and the way out."""
+        info = self._party or {}
+        menu = QMenu(self)
+        header = QAction("Watching together", menu)
+        header.setEnabled(False)
+        menu.addAction(header)
+        for person in info.get("people") or []:
+            notes = []
+            if person.get("id") == info.get("me"):
+                notes.append("you")
+            elif person.get("host"):
+                notes.append("host")
+            if person.get("buffering"):
+                notes.append("loading…")
+            name = elide(str(person.get("name") or "Friend"), 32)
+            line = QAction(f"{name}   ·   {', '.join(notes)}" if notes else name, menu)
+            line.setEnabled(False)
+            menu.addAction(line)
+        menu.addSeparator()
+        if info.get("role") == "host":
+            if info.get("code"):
+                menu.addAction("Copy invite code", lambda: self._copy(info["code"], "Invite code copied"))
+            if info.get("link"):
+                menu.addAction("Copy invite link", lambda: self._copy(info["link"], "Invite link copied"))
+            if info.get("panel"):
+                menu.addAction("Movie night panel…", self.party_panel_requested.emit)
+            menu.addSeparator()
+            menu.addAction("End movie night", self.party_leave_requested.emit)
+        else:
+            menu.addAction("Leave movie night", self.party_leave_requested.emit)
+        return menu
+
+    def _copy(self, text: str, said: str) -> None:
+        QGuiApplication.clipboard().setText(text)
+        self.show_notice(said)
+
     def _place_floaters(self) -> None:
         """Bottom-right corner, clear of the control bar when it's visible."""
         margin = 26
@@ -878,6 +1165,13 @@ class PlayerOverlay(QWidget):
         card = self.next_card
         card.adjustSize()
         card.move(self.width() - card.width() - margin, base - card.height())
+        party_card = self.party_card
+        party_card.adjustSize()
+        party_card.move(self.width() - party_card.width() - margin, base - party_card.height())
+        notice = self._notice
+        notice.adjustSize()
+        top = self._top.y() + self._top.height() + 6 if self._chrome_visible else 22
+        notice.move((self.width() - notice.width()) // 2, top)
         message = self._message
         widest = max(200, min(640, self.width() - 80))
         # Wrap only a line too long for one row: a word-wrapping QLabel sizes
@@ -890,6 +1184,19 @@ class PlayerOverlay(QWidget):
             message.resize(message.sizeHint())
         message.move((self.width() - message.width()) // 2,
                      (self.height() - message.height()) // 2)
+        # Never under a card. A movie night's "Join again" comes up beside the
+        # reason it answers, and in a 960 x 540 player the two met: the card,
+        # 145 px tall above the control bar, covered the end of the sentence
+        # (at 800 x 450 too; at 1280 x 720 they clear each other). The line
+        # moves up just clear of any card it would meet, no higher than where
+        # the notice goes (or below the notice, when there is one).
+        y = message.y()
+        for floater in (self.party_card, self.next_card, self.skip_pill):
+            if floater.isVisibleTo(self) and floater.geometry().intersects(message.geometry()):
+                y = min(y, floater.y() - message.height() - 12)
+        if y != message.y():
+            ceiling = notice.y() + notice.height() + 6 if notice.isVisibleTo(self) else top
+            message.move(message.x(), max(ceiling, y))
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -930,7 +1237,7 @@ class PlayerOverlay(QWidget):
 
     # --- menus --------------------------------------------------------------
 
-    def _popup(self, menu: QMenu, anchor: QWidget) -> None:
+    def _popup(self, menu: QMenu, anchor: QWidget, below: bool = False) -> None:
         self.freeze_chrome(True)
         menu.aboutToHide.connect(lambda: self.freeze_chrome(False))
         # Every menu is built fresh when its button is clicked, and parented here
@@ -939,6 +1246,11 @@ class PlayerOverlay(QWidget):
         # rather than now: the chosen action fires after the menu starts hiding.
         menu.aboutToHide.connect(menu.deleteLater)
         point = anchor.mapToGlobal(QPoint(0, 0))
+        if below:
+            # The top bar's menus drop down, right edges lined up.
+            menu.popup(QPoint(point.x() + anchor.width() - menu.sizeHint().width(),
+                              point.y() + anchor.height() + 8))
+            return
         menu.popup(QPoint(point.x() - menu.sizeHint().width() // 2 + anchor.width() // 2,
                           point.y() - menu.sizeHint().height() - 8))
 
@@ -1019,9 +1331,36 @@ class PlayerOverlay(QWidget):
         self._source_size = source_size
 
     def _show_quality_menu(self) -> None:
+        self._popup(self.quality_menu(), self._quality_button)
+
+    def quality_menu(self) -> QMenu:
+        """A guest's own stream first, in a movie night; then the scaling presets."""
         from ..player.mpv_process import QUALITY_LABELS, QUALITY_PRESETS
 
         menu = QMenu(self)
+        party = self._party
+        if party is not None and party.get("role") == "guest":
+            # A guest's own stream. The original is the film as the host has it;
+            # the others are made on the fly by the host's Mistery, for a
+            # connection or a PC that cannot keep up with it (4K HEVC, say).
+            header = QAction("Movie night stream", menu)
+            header.setEnabled(False)
+            menu.addAction(header)
+            streams = QActionGroup(menu)
+            streams.setExclusive(True)
+            offered = party.get("transcode")
+            for key, label in (("original", "Original  —  the film as the host has it"),
+                               ("1080p", "Smoother  —  1080p"),
+                               ("720p", "Low bandwidth  —  720p")):
+                action = QAction(label, menu)
+                action.setCheckable(True)
+                action.setChecked(key == party.get("quality"))
+                action.setEnabled(key == "original" or bool(offered))
+                action.triggered.connect(
+                    lambda _checked, name=key: self.stream_quality_selected.emit(name))
+                streams.addAction(action)
+                menu.addAction(action)
+            menu.addSeparator()
         # The file's own resolution is the honest ceiling here: none of these
         # presets add detail, they decide how much work goes into showing it.
         if self._source_size:
@@ -1046,7 +1385,7 @@ class PlayerOverlay(QWidget):
             )
             group.addAction(action)
             menu.addAction(action)
-        self._popup(menu, self._quality_button)
+        return menu
 
     def _show_speed_menu(self) -> None:
         menu = QMenu(self)

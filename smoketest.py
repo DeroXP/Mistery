@@ -682,12 +682,20 @@ def main() -> int:
         _pin_on_top(overlay_hwnd, True)
         pump(0.5)
 
+        # Windows does not hit-test a cloaked window, and the test harness
+        # cloaks every window a test opens (MISTERY_HIDE_WINDOWS=1) so that
+        # none pops up on the owner's desktop. These two need one on screen.
+        hit_test = os.environ.get("MISTERY_HIDE_WINDOWS") != "1"
+        if not hit_test:
+            print("  (windows are hidden: the two hit-test checks need one on the screen, skipped)")
         overlay.wake(); pump(0.3)
-        ok("the picture answers the mouse, not mpv",
-           _window_under(*centre, ratio) == overlay_hwnd)
+        if hit_test:
+            ok("the picture answers the mouse, not mpv",
+               _window_under(*centre, ratio) == overlay_hwnd)
         overlay.hide_chrome(); pump(0.3)
-        ok("...still, once the controls have hidden",
-           _window_under(*centre, ratio) == overlay_hwnd)
+        if hit_test:
+            ok("...still, once the controls have hidden",
+               _window_under(*centre, ratio) == overlay_hwnd)
 
         # The controls refuse to hide under a resting pointer, by design — so
         # these checks only mean something when your mouse is elsewhere.

@@ -111,6 +111,7 @@ it the Qt window handle with `--wid`, and drives it over its JSON IPC pipe.
 | mpv | `winget install shinchiro.mpv` — playback |
 | ffmpeg/ffprobe | `winget install Gyan.FFmpeg` — metadata, artwork, thumbnails |
 | Pillow, requests | usually already present; `pip install Pillow requests` |
+| cryptography | `pip install cryptography` — movie night's per-evening certificate |
 
 Everything is discovered on `PATH` (plus the usual install locations), and the
 Settings page shows what was found.
@@ -199,12 +200,12 @@ Settings page shows what was found.
 - Recursive scan of any number of folders; only video files, extras and sample
   clips skipped
 - Scene-release filename parsing —
-  `Spider-Man.2.2004.2160p.BluRayRip.EAC3.5.1.HDR.x265-Groupless[TGx]`
-  becomes **Spider-Man 2** · *2004* with 4K / HDR / HEVC / EAC3 5.1 tags
+  `Night.Train.2019.2160p.BluRay.EAC3.5.1.HDR.x265-GROUP`
+  becomes **Night Train** · *2019* with 4K / HDR / HEVC / EAC3 5.1 tags
 - `SxxExx`, `1x04` and `Season 1 Episode 5` grouped into Show → Season → Episode
 - Series names are taken from the folders when the filename has none, which is
-  the common case for ripped seasons: `Breaking Bad S01/S01E01 - Pilot.mkv`,
-  `Breaking Bad/Season 01/S01E01.mkv` and `The Wire/Season 1/E05 - The Pager.mkv`
+  the common case for ripped seasons: `Harbor Lights S01/S01E01 - Pilot.mkv`,
+  `Harbor Lights/Season 01/S01E01.mkv` and `Northfield/Season 1/E05 - The Signal.mkv`
   all resolve to the right show
 - Parsing rules are versioned (`parser.PARSER_VERSION`). When they change, an
   existing library re-derives its titles and grouping on next launch without
@@ -335,6 +336,65 @@ frame, enough for Windows to treat the surface as present. It costs mpv about
 runs each way. `smoketest.py` asks the OS which window a click at the centre of
 the picture would reach, so this cannot regress unnoticed.
 
+## Movie night
+
+Watch a film or an episode with friends who also have Mistery, each on their
+own PC, in step. It goes straight from the host's PC to theirs: no server in
+between, and the website plays no part in it.
+
+**Starting one.** On a film's page, an episode's menu or the player's menu,
+choose **Start movie night**. Mistery opens one port (42170 unless you change
+it), asks the router to forward it (UPnP), makes a TLS certificate for this
+evening only, and shows an invite code to paste into Discord or a text. Friends
+press **Movie night** at the top of their Mistery and paste it. The whole
+message is fine: the code is found inside it, and a typo is caught by its
+checksum before anything connects.
+
+**Staying together.** Anyone can play, pause or seek. The host's Mistery keeps
+the one clock everyone follows. Small drift is corrected by nudging playback
+speed by up to 5 %, and large drift by a seek. Measured across three Misterys,
+players sat 11–15 ms apart at the median and within 42–53 ms 95 % of the time.
+A frame at 24 fps is 42 ms. If somebody is buffering, everybody waits for them.
+A friend whose connection can't keep up with the film (three stalls in three
+minutes) is offered a lighter stream, and the rest carry on without them
+instead of stopping every few seconds.
+
+**Your own place is never touched.** While a movie night runs, nothing moves
+your resume point, watched state or play count for that film or episode. The
+party's place is kept separately, on every PC in it, and **Movie nights** on
+Home picks it back up with **Continue**.
+
+**Quality.** The file goes as it is: a 4K film here needs 7–12 Mbit/s per
+friend. A friend whose PC or connection can't take the original can choose
+*Smoother (1080p)* or *Low bandwidth (720p)*. The host makes that on the fly,
+on the graphics card when it has an encoder: about 0.2 of a CPU core for a
+1080p episode, and 1.5 cores for 4K HDR tone-mapped down to 1080p. Audio
+track, subtitles and volume stay each person's own.
+
+**Getting friends in.**
+- **At your place:** it works as soon as Windows lets Mistery use the network.
+  It asks once; choose Allow. The host panel says which box to tick.
+- **Elsewhere:** the port has to reach your PC. Many routers have UPnP switched
+  off, and then the host panel shows exactly what to type into the router's
+  page. Once it's done, tick *I've forwarded port 42170 to this PC on my router*
+  in Settings → Movie night, and the panel stops repeating the steps.
+- **A VPN** on the host PC usually hides your home address: pause it for the
+  evening, or let Mistery bypass it (split tunnelling).
+- **Carrier-grade NAT:** some providers put many homes behind one address, and
+  then nothing from outside can reach you. The panel says so plainly.
+
+When the router won't say what your internet address is, Mistery asks a public
+STUN server (Cloudflare's, then Google's), and that question is all it sends.
+
+**Security.** A movie night listens on one port, only while it runs. Everything
+goes over TLS with a certificate made for that evening, and its fingerprint is
+inside the invite code, so a friend's Mistery checks it is really you before it
+sends a byte. The code also carries a 104-bit secret, and without it a request
+gets a bare 404 or a closed connection. Only the one file being watched, and the
+subtitle files named after it, can be reached: never the library, never any
+other file. When the night ends, the port closes and the router's mapping is
+removed. After a crash, that happens at the next start.
+
 ## Music
 
 Albums in your library folders appear under **Music** — Albums, Artists and
@@ -359,8 +419,8 @@ Songs — with a player bar that follows you around the whole app and a full
   it can be switched off in Settings → Music.
   Two things stop that chain from failing quietly. A lyrics tag has to *read*
   like lyrics: albums downloaded from blogs often carry the blog's address in
-  that tag and nothing else — every song on Die Lit has
-  `https://musicriders.blogspot.com/` in it — and a tag like that would
+  that tag and nothing else — every song on one album here has the blog's web
+  address in it — and a tag like that would
   otherwise beat a real synced set and never be asked about again. And when the
   exact lookup misses, the search behind it is scored on title, artist and
   running time, so a file called "Long Time (Intro)" still finds "Long Time -
@@ -478,8 +538,8 @@ player, and it behaves the way a volume control should:
 ### Sound
 
 Two complaints started this: the music was too quiet, and one album played far
-louder than the others. Both had the same cause. The Deftones FLACs carry
-ReplayGain tags asking to be played 11–13 dB down; the Die Lit MP3s carry none.
+louder than the others. Both had the same cause. The rock albums' FLACs carry
+ReplayGain tags asking to be played 11–13 dB down; the loud album's MP3s carry none.
 mpv was doing exactly as it was told — so the tagged albums played at −18 LUFS,
 the untagged one at −8, and all of them sat below what any streaming service
 gives you.
@@ -491,11 +551,11 @@ background alongside the artwork pass — and then hands mpv one number per file
 
 | album | as mastered | played before | played now |
 |---|---|---|---|
-| Die Lit | −8.1 LUFS | −8.1 | −11.0 |
-| White Pony (20th Anniversary) | −7.1 | −17.1 | −11.0 |
-| Around the Fur | −6.3 | −18.0 | −11.0 |
-| private music | −4.7 | −18.1 | −11.0 |
-| Koi No Yokan | −11.7 | −18.0 | −13.2 |
+| hip-hop album, MP3, untagged | −8.1 LUFS | −8.1 | −11.0 |
+| rock album A, FLAC, tagged | −7.1 | −17.1 | −11.0 |
+| rock album B, FLAC, tagged | −6.3 | −18.0 | −11.0 |
+| a folder of singles | −4.7 | −18.1 | −11.0 |
+| rock album C, FLAC, tagged | −11.7 | −18.0 | −13.2 |
 | **loudest to quietest** | | **10.0 dB** | **2.2 dB** |
 
 Koi No Yokan is the whole design in one row. It is a quiet master whose peaks
@@ -732,7 +792,7 @@ into Rich Presence → Art Assets and each title gets its own image.
   whole in the centre over a blurred, darkened frame taken from the backdrop.
   Cropping a 2:3 poster to 16:9 would cut away the faces and the title, and at
   the size Discord draws this a bare film still is usually unrecognisable
-- Keys come from the title (`Breaking Bad` → `breaking-bad`), truncated to
+- Keys come from the title (`Harbor Lights` → `harbor-lights`), truncated to
   Discord's 32-character limit — so the file you upload and the key the player
   asks for agree without anything to configure
 - The export **clears its own folder first**, so a renamed title cannot leave
@@ -883,8 +943,8 @@ Source chain, best available wins:
    episode stills, show poster, genres, rating) and **Wikipedia** for movies
    (poster and plot from the film's article). Wikipedia is searched rather than
    guessed at by article name: filenames can't contain `:`, so
-   `Spider-Man - Across The Spider-Verse` has to find
-   *Spider-Man: Across the Spider-Verse*. Both APIs are throttled to one
+   `Harbor Lights - The Long Night` has to find
+   *Harbor Lights: The Long Night*. Both APIs are throttled to one
    request per host per 0.8 s and back off on HTTP 429.
 3. **The file itself** — several frames are sampled, scored for brightness,
    detail and colour, and the best becomes the poster; HDR sources are

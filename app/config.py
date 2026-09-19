@@ -368,6 +368,15 @@ DEFAULTS: dict = {
     "watched_threshold": 0.92,   # fraction of runtime after which it counts as watched
     "resume_min_seconds": 30,    # don't offer resume for the first N seconds
     "scan_on_startup": True,
+    # Movie night. The name is what friends see; empty means your Windows user
+    # name. The person id is made once per install (see app/party) so a friend
+    # renaming themselves is still the same friend in "Continue movie night".
+    "party_name": "",
+    "party_person_id": "",
+    "party_port": 42170,            # the one port a movie night listens on
+    "party_upnp": True,             # ask the router to open that port while it runs
+    "party_forwarded": False,       # the owner says they forwarded the port by hand
+    "party_quality": "auto",        # auto | original | 1080p | 720p
     # No auto_update key here on purpose. Updates are MisteryUpdate.exe's job
     # and the switch lives in updater.json in the install folder, because the
     # updater runs on PCs where Mistery has never been opened and this file does

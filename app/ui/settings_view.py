@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import os
 import shutil
 import threading
 import time
@@ -33,6 +34,30 @@ def _saver_after() -> int:
     except (TypeError, ValueError):
         value = 180
     return max(10, min(3600, value))
+
+
+def _party_port() -> int:
+    """The movie night port, clamped to what the spin box can hold: settings.json
+    is a file a person can edit."""
+    try:
+        value = int(settings.get("party_port", 42170) or 42170)
+    except (TypeError, ValueError):
+        value = 42170
+    return max(1024, min(65535, value))
+
+
+def _forwarded_words(port: int) -> str:
+    """The box for a port forwarded by hand, with the number in it: a forward is
+    for one port, and the box has to say which."""
+    return f"I've forwarded port {port} to this PC on my router"
+
+
+# The UPnP box's words, which the explanation under the boxes quotes. It said
+# "with the box above ticked" when the box above it was UPnP; since "I've
+# forwarded port …" went in between, the box above is that one, which asks the
+# router nothing. Named, it cannot point at the wrong box again. (The note a
+# new port number leaves names the forwarded box the same way.)
+_UPNP_BOX = "Ask my router to open the port"
 
 
 def _checked_when(answer: dict) -> str:
@@ -95,6 +120,7 @@ class SettingsView(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         root.addWidget(scroll)
+        self._scroll = scroll
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -113,6 +139,8 @@ class SettingsView(QWidget):
         layout.addWidget(self._build_sound())
         layout.addWidget(self._build_thumbnails())
         layout.addWidget(self._build_discord())
+        self._movie_night = self._build_movie_night()
+        layout.addWidget(self._movie_night)
         layout.addWidget(self._build_vr())
         layout.addWidget(self._build_about())
         layout.addStretch(1)
@@ -862,6 +890,186 @@ class SettingsView(QWidget):
                 f"<span style='color:{C.TEXT_DIM}'>Add an Application ID above, "
                 "then press Save and test.</span>")
 
+    # --- movie night --------------------------------------------------------
+
+    def _build_movie_night(self) -> QWidget:
+        from ..party import people      # the name rules only: nothing here touches the network
+
+        card, layout = _section(
+            "Movie night",
+            "Watch a film or episode from your library with friends who have Mistery, in "
+            "sync. Start one from a film's page or from the player; friends join with the "
+            "code it gives you, and each of you keeps your own place in it.",
+        )
+
+        name_row = QHBoxLayout()
+        name_caption = QLabel("Your name")
+        name_caption.setMinimumWidth(150)
+        name_row.addWidget(name_caption)
+        self._party_name = QLineEdit()
+        self._party_name.setMaxLength(people.NAME_MAX)
+        self._party_name.setMinimumWidth(260)
+        # The name friends see when this is empty: the Windows user name, as
+        # people.display_name() falls back to it.
+        self._party_name.setPlaceholderText(
+            people.clean_name(os.environ.get("USERNAME", "")) or people.FALLBACK_NAME)
+        self._party_name.editingFinished.connect(self._on_party_name)
+        name_row.addWidget(self._party_name)
+        name_row.addStretch(1)
+        layout.addLayout(name_row)
+
+        port_row = QHBoxLayout()
+        port_caption = QLabel("Port")
+        port_caption.setMinimumWidth(150)
+        port_row.addWidget(port_caption)
+        self._party_port = QSpinBox()
+        # Below 1024 are the ports Windows services and routers keep for
+        # themselves; none of them is a sensible place for this.
+        self._party_port.setRange(1024, 65535)
+        self._party_port.setMinimumWidth(110)
+        # Saved once the number is typed, not at every digit: typing 42170 again
+        # passed through 4217 on the way, and that unticked "I've forwarded".
+        self._party_port.setKeyboardTracking(False)
+        self._party_port.valueChanged.connect(self._on_party_port)
+        port_row.addWidget(self._party_port)
+        port_row.addStretch(1)
+        layout.addLayout(port_row)
+
+        self._party_upnp = QCheckBox(f"{_UPNP_BOX} while a movie night runs (UPnP)")
+        self._party_upnp.toggled.connect(self._on_party_upnp)
+        layout.addWidget(self._party_upnp)
+
+        # The owner's word that the port is forwarded by hand, and only their
+        # word: with UPnP silent (as on the router of the PC this was built
+        # on) nothing here can see a forward. Ticked, the host panel says so
+        # in one line instead of walking through the router's page every
+        # evening. It names the port because a forward is for one number.
+        self._party_forwarded = QCheckBox()
+        self._party_forwarded.toggled.connect(self._on_party_forwarded)
+        layout.addWidget(self._party_forwarded)
+
+        quality_row = QHBoxLayout()
+        quality_caption = QLabel("Friends start with")
+        quality_caption.setMinimumWidth(150)
+        quality_row.addWidget(quality_caption)
+        self._party_quality = QComboBox()
+        # "auto" sends the file as it is: on the PC this was written on the
+        # upload measured 909 Mbit/s and the heaviest film needs 11.7 Mbit/s a
+        # friend (transcode.per_friend_mbps). A smaller picture is each
+        # friend's own choice, made per request.
+        self._party_quality.addItem("The file as it is (recommended)", "auto")
+        self._party_quality.addItem("1080p, made on the fly", "1080p")
+        self._party_quality.addItem("720p, made on the fly", "720p")
+        self._party_quality.setMinimumWidth(260)
+        self._party_quality.currentIndexChanged.connect(self._on_party_quality)
+        quality_row.addWidget(self._party_quality)
+        quality_row.addStretch(1)
+        layout.addLayout(quality_row)
+
+        # What the last change did; hidden until there is something to say,
+        # or its empty line sat as a gap in the middle of the card.
+        self._party_note = QLabel()
+        self._party_note.setObjectName("Faint")
+        self._party_note.setWordWrap(True)
+        self._party_note.setVisible(False)
+        layout.addWidget(self._party_note)
+
+        explain = QLabel(
+            "Friends can each switch to 1080p or 720p in their player, if the file is too much "
+            "for their connection or their PC; this PC makes those as they watch.\n\n"
+            "What opening a port means: while a movie night runs, Mistery listens on that one "
+            f"port, and with “{_UPNP_BOX}” ticked asks your router to forward it to this PC, "
+            "so friends outside your home can reach it. For that evening anyone on the internet "
+            "could knock on it, so Mistery answers only someone with that movie night's code. "
+            "Everything goes over an encrypted connection with a certificate made for that night "
+            "alone, and the film being watched is the only thing it serves: never your library, "
+            "never any other file. The port closes when the movie night ends, and if Mistery "
+            "crashes mid-film it gives the router the port back the next time it starts.\n\n"
+            "Mistery asks a public STUN server — Cloudflare's, then Google's — for your internet "
+            "address when your router won't say; that is all it sends."
+        )
+        explain.setObjectName("Faint")
+        explain.setWordWrap(True)
+        layout.addWidget(explain)
+        self._reload_movie_night()
+        return card
+
+    def _reload_movie_night(self) -> None:
+        """Back in step with settings.json, saving nothing on the way."""
+        boxes = (self._party_name, self._party_port, self._party_upnp, self._party_forwarded,
+                 self._party_quality)
+        for box in boxes:
+            box.blockSignals(True)
+        self._party_name.setText(str(settings.get("party_name", "") or ""))
+        self._party_port.setValue(_party_port())
+        self._party_upnp.setChecked(bool(settings.get("party_upnp", True)))
+        self._party_forwarded.setText(_forwarded_words(_party_port()))
+        self._party_forwarded.setChecked(bool(settings.get("party_forwarded", False)))
+        # "original" is what "auto" means now, so it shows as that choice.
+        wanted = str(settings.get("party_quality", "auto") or "auto")
+        index = self._party_quality.findData("auto" if wanted == "original" else wanted)
+        self._party_quality.setCurrentIndex(max(0, index))
+        for box in boxes:
+            box.blockSignals(False)
+
+    def _on_party_name(self) -> None:
+        from ..party import people
+
+        # Kept exactly as friends will see it: clean_name is what the room
+        # applies to every name, so the box shows the result, not the typing.
+        name = people.clean_name(self._party_name.text())
+        if name != self._party_name.text():
+            self._party_name.setText(name)
+        if name != str(settings.get("party_name", "") or ""):
+            settings.set("party_name", name)
+            self._say_party(f"Friends will see you as {name or people.display_name()}.")
+
+    def _on_party_port(self, value: int) -> None:
+        settings.set("party_port", int(value))
+        self._party_forwarded.setText(_forwarded_words(value))
+        note = (f"Saved. The next movie night listens on port {value}. A forward made by hand on "
+                "the router has to use the same number.")
+        if settings.get("party_forwarded", False):
+            # The forward the box spoke for is for the old number: left ticked,
+            # the panel would keep saying the port is forwarded when it is not.
+            settings.set("party_forwarded", False)
+            self._party_forwarded.blockSignals(True)
+            self._party_forwarded.setChecked(False)
+            self._party_forwarded.blockSignals(False)
+            # The box by its words, as the explanation names the UPnP one: this
+            # note shows under "Friends start with", two rows below that box,
+            # so "the box below" it once said pointed at no box at all.
+            note += f" So “{_forwarded_words(value)}” is unticked until you have."
+        self._say_party(note)
+
+    def _on_party_upnp(self, on: bool) -> None:
+        settings.set("party_upnp", bool(on))
+        self._say_party(
+            "Saved. The next movie night asks your router to open the port." if on else
+            "Saved. Mistery won't ask your router: friends at your place can still join, and "
+            "friends elsewhere once you forward the port yourself.")
+
+    def _on_party_forwarded(self, on: bool) -> None:
+        settings.set("party_forwarded", bool(on))
+        self._say_party(
+            "Saved. The movie night panel says the port is forwarded in one line, with the router "
+            "steps behind Show how." if on else
+            "Saved. The movie night panel shows the router steps again.")
+
+    def _on_party_quality(self) -> None:
+        settings.set("party_quality", self._party_quality.currentData())
+        self._say_party("Saved. It applies from the next movie night, or the next "
+                        "episode of this one.")
+
+    def _say_party(self, text: str) -> None:
+        self._party_note.setText(text)
+        self._party_note.setVisible(bool(text))
+
+    def show_movie_night(self) -> None:
+        """Scroll to Movie night (the host's panel sends a port problem here)."""
+        self.reload()
+        self._scroll.verticalScrollBar().setValue(max(0, self._movie_night.y() - 20))
+
     # --- vr -----------------------------------------------------------------
 
     def _build_vr(self) -> QWidget:
@@ -1122,6 +1330,7 @@ class SettingsView(QWidget):
         self._reload_folders()
         self._reload_vr()
         self._reload_discord()
+        self._reload_movie_night()
         self._reload_playback_toggles()
         self._reload_sound()
         self._reload_music()

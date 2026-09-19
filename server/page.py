@@ -16,8 +16,10 @@ anybody. Everything dynamic is rendered server-side, once per request, from a
 manifest that is already in memory.
 
 The one thing this page must never do is claim something Mistery does not do. It
-plays files you already have. It does not find, stream, buy or download media,
-and nothing on this page may imply that it does.
+plays files you already have. It does not find, buy or download media, and
+nothing on this page may imply that it does. The one thing it streams is a movie
+night: a file the host already has, from their PC straight to the friends they
+invited, while they watch it together.
 """
 
 from __future__ import annotations
@@ -67,13 +69,27 @@ def _esc(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
+# Movie night leads, across the whole row: it is what 1.2.0 adds, and a seventh
+# card in the three-column grid would otherwise sit alone on a row of its own.
+WIDE_FEATURES = {"Movie night, with friends on their own PCs"}
+
 FEATURES = [
+    (
+        "Movie night, with friends on their own PCs",
+        "Start a movie night on a film or an episode and send the code. Friends who also have "
+        "Mistery paste it and watch with you, in step — <b>within 42–53 ms of each other</b> "
+        "95% of the time, measured — straight from your PC to theirs, with no server in "
+        "between. Anyone can pause or seek, everybody waits for a friend who is buffering, "
+        "and your own place in the film is never touched: the party's place is kept apart. "
+        "It is encrypted with a certificate made for that evening, and it listens on one "
+        "port only while it runs.",
+    ),
     (
         "One library, whatever is in it",
         "Films, shows and albums live in the same library, scanned out of folders you "
         "choose. Scene filenames are parsed — "
-        "<code>Spider-Man.2.2004.2160p.HDR.x265</code> becomes "
-        "<b>Spider-Man 2</b>, 2004, with 4K, HDR and HEVC badges — and "
+        "<code>Night.Train.2019.2160p.HDR.x265</code> becomes "
+        "<b>Night Train</b>, 2019, with 4K, HDR and HEVC badges — and "
         "<code>S01E04</code>, <code>1x04</code> and <code>Season 1 Episode 5</code> all "
         "group into show, season, episode. Artwork and descriptions come from public "
         "sources; a TMDB key makes them better but is not required. A rescan of an "
@@ -247,13 +263,15 @@ def _hero(config: Config, current: Current | None) -> str:
 
 def _requirements() -> str:
     # "About 300 MB" was a guess made before there was an installer to measure.
-    # The install is 444.7 MB, which Windows counts in 1024s and reports as
-    # 424 MB in Add/Remove Programs: 179.0 MB of frozen app and updater,
+    # The install is 455.4 MB, which Windows counts in 1024s and reports as
+    # 434 MB in Add/Remove Programs: 189.7 MB of frozen app and updater,
     # 254.4 MB of mpv and ffmpeg unpacked from a 101.0 MB download, and the
-    # 11.3 MB uninstaller. Measured on 2026-09-17 from the real build, and the
-    # tool halves are the constants in packaging/installer/tool_downloads.py,
-    # which are themselves measured. Say the number a stranger will see on
-    # their own machine, and round it up rather than down.
+    # 11.3 MB uninstaller. Measured on 2026-09-17 from the real build; 1.2.0's
+    # app is 10.7 MB bigger (measured on 2026-09-19), nearly all of it the
+    # cryptography package movie night makes its certificates with. The tool
+    # halves are the constants in packaging/installer/tool_downloads.py, which
+    # are themselves measured. Say the number a stranger will see on their own
+    # machine, and round it up rather than down.
     return """
 <section class="specs">
   <div>
@@ -262,8 +280,8 @@ def _requirements() -> str:
     machine-wide, and updates need no prompt either.</p>
   </div>
   <div>
-    <h3>About 425 MB on disk</h3>
-    <p>170 MB of app, and 250 MB of mpv and ffmpeg, which the installer fetches from their
+    <h3>About 435 MB on disk</h3>
+    <p>180 MB of app, and 250 MB of mpv and ffmpeg, which the installer fetches from their
     own projects during setup — a 100 MB download — rather than shipping copies of them.</p>
   </div>
   <div>
@@ -304,7 +322,7 @@ def _shots(shots: list[Shot]) -> str:
 
 def _features() -> str:
     cards = "\n".join(
-        f"""  <article>
+        f"""  <article{' class="wide"' if heading in WIDE_FEATURES else ''}>
     <h3>{_esc(heading)}</h3>
     <p>{body}</p>
   </article>"""

@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QEvent, QMetaMethod, QPoint, QRect, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from .. import db
@@ -37,6 +37,13 @@ _LAUNCH_SETTINGS = ("hwdec", "hdr_tone_mapping", "subs_on_by_default",
 # A negative subtitle id in the progress table means subtitles were off — hidden,
 # or switched Off in the menu. Only an id that was on screen is stored as itself.
 _SUBS_OFF = -1
+
+# In a movie night Esc (or the back arrow) asks first, and a second press within
+# this long leaves: for the host it ends the evening for everyone, and one
+# stray key should not do that.
+_LEAVE_CONFIRM_S = 4.0
+# How long a line like "Sam paused" stays on the picture.
+_NOTICE_MS = 3500
 
 
 def _subtitle_state_since() -> float:
@@ -85,6 +92,12 @@ class PlayerView(QWidget):
     fullscreen_requested = Signal(bool)
     progress_changed = Signal()
     error = Signal(str)
+    # Movie night, from the player's own controls. party_requested: "Watch
+    # together" on a film or episode that is playing (start one with it); the
+    # pill only shows while something is connected here. party_panel_requested:
+    # the host asks for the movie night panel (invite code, people).
+    party_requested = Signal()
+    party_panel_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -110,6 +123,24 @@ class PlayerView(QWidget):
         self._launched_with: tuple | None = None
         self._quality_applied = ""
         self._subtitle_state_since = _subtitle_state_since()
+
+        # Movie night (app/party/session.py). While one runs, every play, pause
+        # and seek made here goes to the room instead of to mpv, and the
+        # session's follower moves mpv to wherever the room is, for everyone at
+        # once. None when there is none.
+        self._party = None
+        # This title is a movie night's: nothing about it is anybody's own. No
+        # resume point, no watched mark, no play count, no show memory — for as
+        # long as it stays on screen, including after the movie night has ended.
+        self._party_item = False
+        # Why the movie night on screen ended, when it was not our doing (the
+        # host ended it, the connection went): shown until the player closes.
+        self._party_over = ""
+        # When it was the connection that went: the session's way back in
+        # (PartySession.rejoin), which "Join again" on the picture takes.
+        self._party_way_back = None
+        self._leave_armed_until = 0.0
+        self._notice_sticky = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -147,8 +178,8 @@ class PlayerView(QWidget):
 
         self.overlay = PlayerOverlay(owner=self)
         self.overlay.play_pause.connect(self.toggle_pause)
-        self.overlay.seek_relative.connect(lambda s: self.mpv.seek(s))
-        self.overlay.seek_absolute.connect(self.mpv.seek_absolute)
+        self.overlay.seek_relative.connect(self._seek_by)
+        self.overlay.seek_absolute.connect(self._seek_to)
         self.overlay.volume_changed.connect(self._on_volume_changed)
         self.overlay.mute_toggled.connect(lambda: self.mpv.command("cycle", "mute"))
         self.overlay.audio_track_selected.connect(self.mpv.set_audio_track)
@@ -158,7 +189,7 @@ class PlayerView(QWidget):
         self.overlay.chapter_selected.connect(self._on_chapter)
         self.overlay.boost_toggled.connect(self.set_dialogue_boost)
         self.overlay.fullscreen_toggled.connect(self.toggle_fullscreen)
-        self.overlay.close_requested.connect(self.stop_and_close)
+        self.overlay.close_requested.connect(self.request_close)
         self.overlay.next_requested.connect(lambda: self._advance_to_next(False))
         self.overlay.next_from_card.connect(lambda: self._advance_to_next(True))
         self.overlay.previous_requested.connect(self._go_to_previous)
@@ -166,6 +197,27 @@ class PlayerView(QWidget):
         self.overlay.skip_intro.connect(self.skip_intro)
         self.overlay.next_cancelled.connect(self._on_next_declined)
         self.overlay.tv_action.connect(self._on_tv_action)
+        self.overlay.party_requested.connect(self.party_requested.emit)
+        self.overlay.party_panel_requested.connect(self.party_panel_requested.emit)
+        self.overlay.party_leave_requested.connect(self._leave_party)
+        self.overlay.stream_quality_selected.connect(self._on_stream_quality)
+        self.overlay.party_card_accepted.connect(self._on_party_card)
+
+        # The media keys, while a movie night runs. Outside one they are left to
+        # Windows as before (MainWindow's shortcuts for them are the music's, and
+        # off while a film is on screen). In one, a key that reached Windows would
+        # go to the paused music's media session and start it over the film; a
+        # shortcut claims the key, so Qt keeps it, and it becomes an intent.
+        self._party_keys = [
+            QShortcut(QKeySequence(Qt.Key.Key_MediaTogglePlayPause), self,
+                      activated=self.toggle_pause, autoRepeat=False),
+            QShortcut(QKeySequence(Qt.Key.Key_MediaPlay), self,
+                      activated=lambda: self._party_intent("play"), autoRepeat=False),
+            QShortcut(QKeySequence(Qt.Key.Key_MediaPause), self,
+                      activated=lambda: self._party_intent("pause"), autoRepeat=False),
+        ]
+        for shortcut in self._party_keys:
+            shortcut.setEnabled(False)
 
         self.presence = DiscordPresence(str(settings.get("discord_client_id", "")))
         if settings.get("discord_presence"):
@@ -271,6 +323,12 @@ class PlayerView(QWidget):
         item = self._item
         if item is None:
             return
+        party = self._party
+        if (party is not None and party.role == "guest") or (party is None and self._party_item):
+            # What comes next is the host's to choose, for everyone; and once the
+            # movie night is over there is nothing on either side to move to.
+            self.overlay.set_episode_nav(False, False, False)
+            return
         self.overlay.set_episode_nav(
             item.is_episode or bool(self._line_up),
             bool(self._previous_row(item)),
@@ -278,11 +336,25 @@ class PlayerView(QWidget):
         )
 
     def play(self, item: MediaItem, start_at: float | None = None) -> bool:
-        """Load a file. Returns False if it cannot be played."""
+        """Load a file. Returns False if it cannot be played.
+
+        In a movie night the title is the room's: the session's follower opens
+        it, where the room is (start_at is only a hint then), and nothing about
+        it is saved as this person's own.
+        """
         self.save_progress()
 
+        party = self._party
+        if party is not None and not party.owns(item):
+            # Something else asked for while a movie night runs: the movie night
+            # ends first (the host's for everyone), then this plays as it would.
+            party = None
+            self._drop_party()
+        guest = party is not None and party.role == "guest"
+
         # The library is a cache: a file can be moved or deleted after a scan.
-        if not Path(item.path).is_file():
+        # A guest's title is the host's, streamed: there is no file here.
+        if not guest and not Path(item.path).is_file():
             message = f"{Path(item.path).name} is no longer on disk."
             self.error.emit(message)
             db.update_media(item.id, missing=1)
@@ -291,23 +363,36 @@ class PlayerView(QWidget):
                 # shows errors is hidden here, and what's playing carries on.
                 self.overlay.show_message(message, 6000)
                 self.overlay.wake()
+            if party is not None:
+                party.player_failed(message)
             return False
 
         # Before any state changes, so a player that cannot start leaves the
         # current title exactly as it was.
         if not self._ensure_mpv():
+            if party is not None:
+                party.player_failed("The video player could not start.")
             return False
 
         self._item = item
         self._ending = False
+        self._party_item = party is not None
+        self._party_over = ""
+        self._party_way_back = None
         self._duration = item.duration or 0.0
         self._position = 0.0
         self._pending_start = item.resume_position if start_at is None else max(0.0, start_at)
+        if party is not None:
+            # The room decides where; this only fills the bar until mpv says.
+            self._pending_start = party.room_position()
 
-        self.overlay.set_title(
-            item.title or item.path,
-            item.code if item.is_episode else (str(item.year) if item.year else ""),
-        )
+        if guest:
+            self.overlay.set_title(*_party_titles(party.media, item))
+        else:
+            self.overlay.set_title(
+                item.title or item.path,
+                item.code if item.is_episode else (str(item.year) if item.year else ""),
+            )
         self.overlay.set_duration(self._duration)
         self.overlay.set_position(self._pending_start)
         self.overlay.set_paused(False)
@@ -339,17 +424,26 @@ class PlayerView(QWidget):
         self._load_tv_model()
 
         self.overlay.clear_message()
+        self.overlay.hide_party_card()
         self._opening_timer.start()
 
         # Read before bump_play_count, which creates the progress row.
-        options = self._track_options(item)
+        options = {} if guest else self._track_options(item)
         self._awaiting_file = True
-        self.mpv.load(item.path, start_at=self._pending_start, options=options)
-        db.bump_play_count(item.id)
+        if party is None:
+            self.mpv.load(item.path, start_at=self._pending_start, options=options)
+            db.bump_play_count(item.id)
+        else:
+            # The follower opens it, paused, where the room will be once it is
+            # ready, and starts it on the room's clock. The tracks are still
+            # this person's own: the host's from their saved choices, a guest's
+            # from their language settings.
+            party.open_media(options)
         self._active = True
         self._save_timer.start()
         self._geometry_timer.start()
         self._sync_overlay()
+        self._show_party()
         self.overlay.show()
         self.overlay.wake()
         return True
@@ -445,9 +539,12 @@ class PlayerView(QWidget):
         if not self._active:
             return
         self._opening_timer.stop()
-        self.overlay.clear_message()
+        if not self._party_over:
+            self.overlay.clear_message()
         self._apply_boost(bool(settings.get("dialogue_boost")))
         self._presence_timer.start()        # once duration is known
+        if self._party is not None:
+            self._party.file_loaded()       # a guest's subtitle files, added again
 
     # --- TV: intro / credits / subtitle memory -------------------------------
 
@@ -529,7 +626,7 @@ class PlayerView(QWidget):
             return
         self._intro_skipped = True
         self.overlay.show_skip_pill(False)
-        self.mpv.seek_absolute(self._intro[1])
+        self._seek_to(self._intro[1])
 
     def _on_tv_action(self, action: str) -> None:
         if self._show_id is None:
@@ -565,7 +662,9 @@ class PlayerView(QWidget):
             in_window = start <= position < end - 1.0
             # Auto-skip only when playback flows into the window on its own
             # (position just past its start, first time). A deliberate seek back
-            # into the intro gets the pill, never a forced jump.
+            # into the intro gets the pill, never a forced jump. In a movie night
+            # only the host's player has an intro window (a guest's title is not
+            # in its library), and its skip is the room's seek, for everyone.
             if (in_window and not self._intro_skipped
                     and position - start < 4.0
                     and settings.get("auto_skip_intro", True)):
@@ -575,7 +674,9 @@ class PlayerView(QWidget):
         else:
             self.overlay.show_skip_pill(False)
 
-        if (not self._next_card_shown and not self._next_card_declined
+        # Up Next and its countdown stay out of a movie night: the next episode
+        # is the host's to put on, for everyone (Next episode together).
+        if (not self._party_item and not self._next_card_shown and not self._next_card_declined
                 and self._duration > 0):
             candidates = [c for c in (self._credits_at, self._credits_from_chapters())
                           if c is not None]
@@ -612,6 +713,9 @@ class PlayerView(QWidget):
         """
         # The Up Next countdown is a timer: it can run out after you've left.
         if not self._active or self._item is None:
+            return
+        if self._party_item:
+            self._party_change(1)
             return
         finished = self._item
         step = self._line_step(1) if self._line_up else None
@@ -662,6 +766,9 @@ class PlayerView(QWidget):
     def _go_to_previous(self) -> None:
         if not self._active or self._item is None:
             return
+        if self._party_item:
+            self._party_change(-1)
+            return
         step = self._line_step(-1) if self._line_up else None
         row = step[1] if step else (None if self._line_up else
                                     db.previous_episode(self._item.id))
@@ -681,6 +788,11 @@ class PlayerView(QWidget):
             return
         item = self._item
         if not self._active or item is None or self._ending:
+            return
+        if self._party_item:
+            # Never watched, never Up Next, never closing by itself: the end of a
+            # movie night's film is the room's, and what follows is the host's.
+            self._party_end_of_file(reason)
             return
         self._ending = True
 
@@ -714,6 +826,15 @@ class PlayerView(QWidget):
         self.stop_and_close()
 
     def toggle_pause(self) -> None:
+        if self._party_item:
+            # The room's state decides: pause while it plays, play while it does not
+            # (and while it waits for somebody, play means go on without them).
+            if self._party is not None:
+                self._party.toggle()
+            else:
+                self._say_party_over()
+            self.overlay.wake()
+            return
         self.mpv.toggle_pause()
         self.overlay.wake()
 
@@ -735,10 +856,15 @@ class PlayerView(QWidget):
         self.overlay.next_card.hide_quietly()
         self.overlay.show_skip_pill(False)
         self.overlay.clear_message()
+        self.overlay.hide_party_card()
+        self.overlay.clear_notice()
         self._sleep_paused = False
         self._next_card_shown = False
         self._next_card_declined = False
         self._item = None
+        self._party_item = False
+        self._party_over = ""
+        self._party_way_back = None
         self._show_id = None
         self._line_up = []
         self._line_index = 0
@@ -746,17 +872,23 @@ class PlayerView(QWidget):
         self._duration = 0.0
 
     def stop_and_close(self) -> None:
+        # Out of the movie night first (the host's ends it for everyone): the
+        # session's follower stops before mpv does, so it cannot open anything
+        # again behind the closing player.
+        self._drop_party()
         self._flush_volume()
         self._end_session()
         self.mpv.stop()
         self.presence.clear()
         self.overlay.hide()
+        self._show_party()
         if self._fullscreen:
             self.toggle_fullscreen()
         self.closed.emit()
 
     def shutdown(self) -> None:
         self._closing = True
+        self._drop_party(shutting_down=True)
         self._flush_volume()            # a level set in the last 400 ms is still only in mpv
         self.presence.clear()
         self.presence.stop()
@@ -794,7 +926,11 @@ class PlayerView(QWidget):
                     "Watching something", "", None, self._paused, "Mistery"
                 )
                 return
-            if item.is_episode:
+            party = self._party
+            if party is not None and party.role == "guest":
+                # The host's title: this PC has no row for it, and no show.
+                title, subtitle = _party_titles(party.media, item)
+            elif item.is_episode:
                 show = db.get_show(item.show_id) if item.show_id else None
                 title = (show["title"] if show else item.title) or item.title
                 subtitle = f"{item.code} · {item.title}".strip(" ·")
@@ -822,7 +958,7 @@ class PlayerView(QWidget):
         self.error.emit(
             f"The video player stopped unexpectedly (exit {code}). Returning to the library."
         )
-        self.stop_and_close()
+        self.stop_and_close()           # a movie night on it is left (or ended) on the way
 
     # --- state --------------------------------------------------------------
 
@@ -840,6 +976,10 @@ class PlayerView(QWidget):
             self.overlay.set_position(self._position)
             self._tv_tick(self._position)
         elif name == "duration" and value:
+            if self._party is not None and self._party.role == "guest" and self._duration > 0:
+                # The host's length: a transcoded stream has none of its own that
+                # can be trusted (it starts wherever it was opened).
+                return
             self._duration = float(value)
             self.overlay.set_duration(self._duration)
             self._load_tv_model()          # credits point depends on duration
@@ -918,6 +1058,8 @@ class PlayerView(QWidget):
             settings.set("volume", pending)
 
     def _on_speed(self, speed: float) -> None:
+        if self._party_item:
+            return          # the room's rate, and the follower's nudges, not a choice here
         self.mpv.set_speed(speed)
         self.overlay.set_speed(speed)
 
@@ -930,8 +1072,31 @@ class PlayerView(QWidget):
         self.overlay.wake()
 
     def _on_chapter(self, index: int) -> None:
+        if self._party_item:
+            chapters = self.mpv.chapters()
+            if 0 <= index < len(chapters):
+                self._seek_to(float(chapters[index].get("time") or 0.0))
+            self.overlay.wake()
+            return
         self.mpv.set_property("chapter", index)
         self.overlay.wake()
+
+    def _chapter_step(self, step: int) -> None:
+        """PgUp/PgDn in a movie night: the chapter's start, as a seek for everyone."""
+        starts = [float(c.get("time") or 0.0) for c in self.mpv.chapters()]
+        if not starts:
+            return
+        here = self._position
+        if step > 0:
+            later = [s for s in starts if s > here + 1.0]
+            if later:
+                self._seek_to(later[0])
+        else:
+            # Back to this chapter's start, or the one before when just past it,
+            # as mpv's own "add chapter -1" does.
+            earlier = [s for s in starts if s < here - 2.0]
+            if earlier:
+                self._seek_to(earlier[-1])
 
     def set_dialogue_boost(self, enabled: bool) -> None:
         settings.set("dialogue_boost", bool(enabled))
@@ -945,7 +1110,9 @@ class PlayerView(QWidget):
 
     def save_progress(self) -> None:
         item = self._item
-        if item is None or self._position <= 0:
+        # A movie night's title is the party's: its place is kept in
+        # party_progress by the session, never here, before, during or after.
+        if item is None or self._party_item or self._position <= 0:
             return
         self._remember_show_tracks()
         duration = self._duration or item.duration or 0.0
@@ -1030,8 +1197,14 @@ class PlayerView(QWidget):
         """
         if not self._active or self._item is None or self._paused:
             return False
+        if self._party_item:
+            # A pause like any other in a movie night: the room's, for everyone.
+            if self._party is None or not self._party.room_playing():
+                return False
+            self._party.intent("pause")
+        else:
+            self.mpv.pause()
         self._sleep_paused = True
-        self.mpv.pause()
         self.overlay.show_message("Paused by the sleep timer")
         self.overlay.wake()
         return True
@@ -1046,13 +1219,13 @@ class PlayerView(QWidget):
         if key == Qt.Key.Key_Space or key == Qt.Key.Key_K:
             self.toggle_pause()
         elif key == Qt.Key.Key_Left:
-            self.mpv.seek(-1 if modifiers & Qt.KeyboardModifier.ShiftModifier else -step)
+            self._seek_by(-1 if modifiers & Qt.KeyboardModifier.ShiftModifier else -step)
         elif key == Qt.Key.Key_Right:
-            self.mpv.seek(1 if modifiers & Qt.KeyboardModifier.ShiftModifier else step)
+            self._seek_by(1 if modifiers & Qt.KeyboardModifier.ShiftModifier else step)
         elif key == Qt.Key.Key_J:
-            self.mpv.seek(-step * 3)
+            self._seek_by(-step * 3)
         elif key == Qt.Key.Key_L:
-            self.mpv.seek(step * 3)
+            self._seek_by(step * 3)
         elif key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
             # Stepped from the level we asked mpv for, which is the one the bar
             # is showing: mpv's cached echo can still be catching up with a drag,
@@ -1078,9 +1251,15 @@ class PlayerView(QWidget):
             self.set_dialogue_boost(not bool(settings.get("dialogue_boost")))
             self.overlay.set_boost(bool(settings.get("dialogue_boost")))
         elif key == Qt.Key.Key_PageUp:
-            self.mpv.previous_chapter()
+            if self._party_item:
+                self._chapter_step(-1)
+            else:
+                self.mpv.previous_chapter()
         elif key == Qt.Key.Key_PageDown:
-            self.mpv.next_chapter()
+            if self._party_item:
+                self._chapter_step(1)
+            else:
+                self.mpv.next_chapter()
         elif key == Qt.Key.Key_I:
             self.skip_intro()
         elif key == Qt.Key.Key_N:
@@ -1093,17 +1272,287 @@ class PlayerView(QWidget):
                 self._go_to_previous()
             else:
                 return False
-        elif key == Qt.Key.Key_Period:
-            self.mpv.command("frame-step")
-        elif key == Qt.Key.Key_Comma:
-            self.mpv.command("frame-back-step")
+        elif key in (Qt.Key.Key_Period, Qt.Key.Key_Comma):
+            if self._party_item:
+                # One player a frame away from the rest is not "together", and a
+                # frame step for everyone is not what anybody reaching for it means.
+                self.party_notice("Frame stepping is off during a movie night.")
+            elif key == Qt.Key.Key_Period:
+                self.mpv.command("frame-step")
+            else:
+                self.mpv.command("frame-back-step")
         elif key == Qt.Key.Key_Escape:
             if self._fullscreen:
                 self.toggle_fullscreen()
             else:
-                self.stop_and_close()
+                self.request_close()
         else:
             return False
 
         self.overlay.wake()
         return True
+
+    # --- movie night ---------------------------------------------------------
+
+    @property
+    def party(self):
+        """The PartySession this player is part of, or None."""
+        return self._party
+
+    @property
+    def position(self) -> float:
+        return self._position
+
+    def set_party(self, party) -> None:
+        """Join this player to a movie night's session (None: out of it again).
+
+        What was on screen until now was this person's own, and is saved as
+        such before anything changes: a film started alone and turned into a
+        movie night from the player keeps the place it had reached alone. From
+        here on, the title on screen is the party's.
+        """
+        if party is self._party:
+            return
+        if party is not None:
+            self.save_progress()
+            # Only the party's own title becomes the party's: a host who picks
+            # another episode than the one on screen keeps that one their own
+            # until the party's opens in its place (and if it cannot open, for good).
+            # A title that is a movie night's already stays one. A guest joining
+            # again from the picture of the one whose connection went is still
+            # looking at its stream, from a proxy since stopped, which the new
+            # session does not own: made "their own" here, the play() that opens
+            # the new stream first saved it as theirs, a progress row for media
+            # id 0, which the database refuses, and the new stream never opened.
+            self._party_item = self._party_item or (self._item is not None and party.owns(self._item))
+            if self._party_over:
+                self.overlay.clear_message()        # why the last one ended no longer applies
+            self._party_over = ""
+            self._party_way_back = None
+            self._leave_armed_until = 0.0
+        self._party = party
+        for shortcut in self._party_keys:
+            shortcut.setEnabled(party is not None)
+        self._refresh_nav()
+        self._show_party()
+
+    def party_refresh(self) -> None:
+        """People, the host's invite, a guest's stream: redraw what the overlay shows of them."""
+        self._show_party()
+
+    def _show_party(self) -> None:
+        party = self._party
+        if party is None:
+            self.overlay.set_party(None, can_start=self._party_startable(), over=self._party_item)
+            return
+        self.overlay.set_party({
+            "role": party.role,
+            "people": party.people,
+            "me": party.me_id,
+            "code": party.invite_code,
+            "link": party.invite_link,
+            "quality": party.stream_quality if party.role == "guest" else None,
+            "transcode": party.can_transcode,
+            "panel": self._answered(self.party_panel_requested),
+        })
+
+    def _party_startable(self) -> bool:
+        """"Watch together" only on a film or episode of this library, playing,
+        and only if something is there to answer it."""
+        item = self._item
+        return (self._active and item is not None and bool(item.id) and not self._party_item
+                and self._answered(self.party_requested))
+
+    def _answered(self, signal) -> bool:
+        """Whether anything listens to one of this view's signals: a button that
+        would emit into nothing is better not shown."""
+        return self.isSignalConnected(QMetaMethod.fromSignal(signal))
+
+    def party_notice(self, text: str, sticky: bool = False) -> None:
+        """A line from the movie night on the picture: "Sam paused", "Alex joined".
+        A sticky one ("Waiting for Sam…") stays until the room moves on; an
+        empty text takes a sticky line down and leaves a passing one be."""
+        if text:
+            self._notice_sticky = sticky
+            self.overlay.show_notice(text, 0 if sticky else _NOTICE_MS)
+        elif self._notice_sticky:
+            self._notice_sticky = False
+            self.overlay.clear_notice()
+
+    def party_offer(self, quality: str, why: str = "pausing") -> None:
+        """A guest's stream is not keeping up: offer a lighter one, and say what
+        was seen. why: "pausing" (it keeps stalling), "slow" (its picture is
+        slow to arrive at all), "skipping" (this PC drops frames decoding it)."""
+        if self._party is None or self._party.role != "guest":
+            return
+        heading = {"slow": "YOUR STREAM IS SLOW TO ARRIVE",
+                   "skipping": "THE PICTURE KEEPS SKIPPING"}.get(why, "YOUR STREAM KEEPS PAUSING")
+        self.overlay.present_party_card(
+            f"quality:{quality}", heading,
+            f"Switch to {quality}? Easier on your connection and your PC.",
+            f"Switch to {quality}", "Not now")
+        self.overlay.wake()
+
+    def party_over(self, reason: str, way_back=None) -> None:
+        """The movie night on screen has ended, and not by this player's doing: the
+        host ended it, or the connection to it went. The picture stays, paused,
+        with the reason, until the player is closed; nothing plays on from here,
+        and nothing about it becomes this person's own.
+
+        way_back, when the connection went: a callable that joins the same movie
+        night again (PartySession.rejoin). The picture offers it as "Join again",
+        and again at every play or seek pressed, until it is taken or the player
+        closes."""
+        self._party = None
+        for shortcut in self._party_keys:
+            shortcut.setEnabled(False)
+        self._party_over = reason or "The movie night has ended."
+        self._party_way_back = way_back
+        self._leave_armed_until = 0.0
+        if self.mpv.is_running:
+            self.mpv.pause()
+            self.mpv.set_speed(1.0)
+        self.overlay.hide_party_card()
+        self._notice_sticky = False
+        self.overlay.clear_notice()
+        self._refresh_nav()
+        self._show_party()
+        self._say_party_over()
+
+    def _say_party_over(self) -> None:
+        if self._party_over:
+            self.overlay.show_message(self._party_over)
+            if self._party_way_back is not None:
+                # No word on whether the code still works: nothing here knows
+                # until it is tried, and this card comes back after a try that
+                # did not get in, beside "...or the movie night may be over".
+                self.overlay.present_party_card(
+                    "rejoin", "CONNECTION LOST", "Join again? You'll be where everyone is now.",
+                    "Join again", "Not now")
+            self.overlay.wake()
+
+    def _party_rejoin(self) -> None:
+        """"Join again" on the picture: the session connects with the code it
+        already has, and the player opens the room's stream once it is in."""
+        way_back = self._party_way_back
+        if way_back is None or not self._active or self._party is not None:
+            return
+        if not way_back():
+            self._say_party_over()          # not now after all: the reason, and the offer, again
+
+    def _drop_party(self, shutting_down: bool = False) -> None:
+        """Out of the movie night, from the player's side: the session leaves it
+        (a guest) or ends it for everyone (the host)."""
+        party, self._party = self._party, None
+        for shortcut in self._party_keys:
+            shortcut.setEnabled(False)
+        if party is not None:
+            party.player_closed(shutting_down)
+
+    def _party_intent(self, action: str, position: float | None = None) -> None:
+        if self._party is not None:
+            self._party.intent(action, position)
+        elif self._party_item:
+            self._say_party_over()
+
+    def _seek_by(self, seconds: float) -> None:
+        """The skip buttons and the arrow keys. In a movie night, from where the
+        room is: that is what everybody is looking at."""
+        if self._party_item:
+            if self._party is not None:
+                self._party.intent("seek", self._party.room_position() + float(seconds))
+            else:
+                self._say_party_over()
+            return
+        self.mpv.seek(seconds)
+
+    def _seek_to(self, position: float) -> None:
+        """The seek bar, Skip intro, a chapter: to the room in a movie night."""
+        if self._party_item:
+            self._party_intent("seek", float(position))
+            return
+        self.mpv.seek_absolute(position)
+
+    def request_close(self) -> None:
+        """Esc or the back arrow. In a movie night the first press asks, and a
+        second within 4 s leaves: the host's ends the evening for everyone."""
+        if self._party is not None:
+            now = time.monotonic()
+            if now > self._leave_armed_until:
+                self._leave_armed_until = now + _LEAVE_CONFIRM_S
+                self.party_notice("End the movie night for everyone? Press Esc or Back again."
+                                  if self._party.role == "host" else
+                                  "Leave the movie night? Press Esc or Back again.")
+                self.overlay.wake()
+                return
+        self.stop_and_close()
+
+    def _leave_party(self) -> None:
+        """End movie night (the host) or Leave (a guest), from the overlay's menu:
+        chosen from a menu, so no second asking."""
+        self.stop_and_close()
+
+    def _party_change(self, step: int) -> None:
+        """N and P, and the next and previous buttons, in a movie night: the host's
+        move everyone on (Next episode together); a guest's do nothing."""
+        party = self._party
+        if party is None or party.role != "host" or self._item is None:
+            return
+        row = self._next_row(self._item) if step > 0 else self._previous_row(self._item)
+        if row is None:
+            return
+        self.overlay.hide_party_card()
+        if party.change_media(MediaItem.from_row(db.get_media(int(row["id"])))):
+            if self._line_up:
+                found = self._line_step(step)
+                if found is not None:
+                    self._line_index = found[0]
+
+    def _party_end_of_file(self, reason: str) -> None:
+        party = self._party
+        if party is None:
+            return          # the movie night is over: the film just stays where it is
+        duration = self._duration
+        room_ended = bool(duration) and party.room_position() >= duration - 3.0
+        if party.role == "guest" and (reason == "error" or not room_ended):
+            party.stream_trouble(reason)    # the stream stopped short, not the film
+            return
+        if reason == "error":
+            self.overlay.show_message("This file could not be played.")
+            self.overlay.wake()
+            return
+        item = self._item
+        if party.role == "host":
+            row = self._next_row(item) if item is not None else None
+            if row is not None:
+                nxt = MediaItem.from_row(db.get_media(int(row["id"])))
+                self.overlay.present_party_card("next", "NEXT, TOGETHER", nxt.display_title,
+                                                "Watch it together", "Not now")
+        elif item is not None and item.is_episode:
+            self.party_notice(f"That's the end of the episode. {party.host_name or 'The host'} "
+                              "puts the next one on for everyone.", sticky=True)
+        self.overlay.wake()
+
+    def _on_party_card(self, which: str) -> None:
+        if which == "next":
+            self._party_change(1)
+        elif which == "rejoin":
+            self._party_rejoin()
+        elif which.startswith("quality:"):
+            self._on_stream_quality(which.split(":", 1)[1])
+
+    def _on_stream_quality(self, quality: str) -> None:
+        if self._party is not None:
+            self._party.set_stream_quality(quality)
+            self._show_party()
+            self.overlay.wake()
+
+
+def _party_titles(media: dict, item: MediaItem) -> tuple[str, str]:
+    """(title, the line under it) for a guest's player, from the host's words:
+    the show and "S01E03 · Title" for an episode, the film and its year."""
+    if media.get("show"):
+        detail = " · ".join(str(bit) for bit in (media.get("code"), media.get("name")) if bit)
+        return str(media["show"]), detail
+    year = media.get("year")
+    return str(media.get("title") or item.title), (str(year) if year else "")

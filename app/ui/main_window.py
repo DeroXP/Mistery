@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -27,6 +27,7 @@ from .library_view import LibraryView
 from .music_view import MusicView
 from .playlists_view import PlaylistsView
 from .now_playing import NowPlayingBar, NowPlayingView
+from .party_dialog import HostDialog, JoinDialog, MovieNightButton, ask_to_end
 from .player_view import PlayerView
 from .settings_view import SettingsView
 from .show_view import ShowView
@@ -76,6 +77,48 @@ class NavButton(QPushButton):
         )
 
 
+class _StatusLine(QLabel):
+    """The top bar's line of library news, which gives way first.
+
+    At the window's 960 px minimum the bar needs 1016 px with the movie night
+    button in it (976 before it). A plain label kept its full width and the
+    squeeze landed on the wordmark instead (125 of its 139 px, measured) while
+    this line was cut off at its start. Now it shrinks to nothing if it must,
+    and ends in "…" rather than mid-letter; text() is still the whole line.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._full = ""
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
+        self._full = text or ""
+        self._elide()
+
+    def text(self) -> str:
+        return self._full
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return QSize(self.fontMetrics().horizontalAdvance(self._full) + 2, super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, self.width())
+        super().setText(shown)
+        self.setToolTip(self._full if shown != self._full else "")
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -92,6 +135,11 @@ class MainWindow(QMainWindow):
         # (stack index, what that page was showing) — see _page_state.
         self._history: list[tuple[int, object]] = []
         self._suppress_nav = False
+        # Movie night: the session and its two windows, made when first needed
+        # (see party_session).
+        self._party = None
+        self._host_dialog: HostDialog | None = None
+        self._join_dialog: JoinDialog | None = None
 
         root = QWidget()
         root.setObjectName("RootPane")
@@ -183,6 +231,12 @@ class MainWindow(QMainWindow):
         self._music_watch.timeout.connect(self._watch_music)
         self._music_watch.start(30_000)
 
+        # The movie night session, once the window is up rather than during
+        # startup: importing it costs 15-22 ms (sync pulls in statistics and
+        # decimal), and making it takes back a router forward that a crash left
+        # open, which is "at the next start" either way.
+        QTimer.singleShot(2000, self, self.party_session)
+
     def _retry_failed_artwork(self) -> None:
         failed = images.failed_paths()
         if not failed or self._in_tray or self.stack.currentWidget() is self.player:
@@ -226,13 +280,19 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
-        self._status = QLabel()
+        self._status = _StatusLine()
         self._status.setObjectName("NavStats")
         self._status.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         layout.addWidget(self._status)
         layout.addSpacing(14)
+
+        # Join a friend's movie night from any page; while one is on, its panel.
+        self._party_button = MovieNightButton()
+        self._party_button.clicked.connect(self.show_movie_night)
+        layout.addWidget(self._party_button)
+        layout.addSpacing(2)
 
         self._rescan = IconButton("refresh", size=36, icon_size=19,
                                   tooltip="Rescan the library  (Ctrl+R)")
@@ -247,6 +307,9 @@ class MainWindow(QMainWindow):
         self.home.open_media.connect(self.open_media)
         self.home.open_show.connect(self.open_show)
         self.home.add_folder_requested.connect(self._add_folder)
+        self.home.movie_nights.join_requested.connect(self.join_movie_night)
+        self.home.movie_nights.continue_requested.connect(self.continue_movie_night)
+        self.home.movie_nights.forget_requested.connect(self._forget_movie_night)
 
         for view in (self.movies, self.shows, self.search):
             view.play_requested.connect(lambda item: self.play(item))
@@ -267,10 +330,12 @@ class MainWindow(QMainWindow):
 
         self.detail.play_requested.connect(self.play)
         self.detail.play_in_vr_requested.connect(self.play_in_vr)
+        self.detail.movie_night_requested.connect(self.start_movie_night)
         self.detail.back_requested.connect(self.go_back)
         self.detail.media_changed.connect(self.reload_all)
 
         self.show_page.play_requested.connect(self.play)
+        self.show_page.movie_night_requested.connect(self.start_movie_night)
         self.show_page.open_media.connect(self.open_media)
         self.show_page.back_requested.connect(self.go_back)
 
@@ -295,6 +360,11 @@ class MainWindow(QMainWindow):
         self.player.fullscreen_requested.connect(self._set_fullscreen)
         self.player.progress_changed.connect(self._on_progress_changed)
         self.player.error.connect(self._on_player_error)
+        # The player's menu: "Watch together" on what is playing, and the host's
+        # way back to the panel with the code on it (the top bar is hidden there).
+        self.player.party_requested.connect(
+            lambda: self.start_movie_night(self.player.current_item))
+        self.player.party_panel_requested.connect(self.show_movie_night)
 
         self.music_page.album_opened.connect(self.open_album)
         self.music_page.artist_opened.connect(self.open_artist)
@@ -405,8 +475,11 @@ class MainWindow(QMainWindow):
         # go_back() only swaps the page: the film played on, audio and progress
         # saves included, with no controls left to stop it. Back from a film is
         # closing it, as Esc and the overlay's arrow do, and closing goes back.
+        # The same way they do: in a movie night the first press asks, since a
+        # host's Back ends the evening for everyone (request_close; outside one
+        # it closes at once, as before).
         if self.stack.currentWidget() is self.player:
-            self.player.stop_and_close()
+            self.player.request_close()
         else:
             self.go_back()
 
@@ -569,7 +642,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self._watch_music)     # downloads may have finished
 
     def quit_app(self) -> None:
-        """Really quit — the tray's Quit, as opposed to closing the window."""
+        """Really quit — the tray's Quit, as opposed to closing the window.
+        Hosting friends, it asks first, as closing the window does."""
+        if not self._may_end_movie_night(quitting=True):
+            return
         self._quitting = True
         self._shutdown()
         QApplication.instance().quit()
@@ -898,6 +974,8 @@ class MainWindow(QMainWindow):
                 self.play(item)
         elif action == "vr":
             self.play_in_vr(item)
+        elif action == "party":
+            self.start_movie_night(item)
         elif action == "details":
             if isinstance(item, ShowItem):
                 self.open_show(item)
@@ -1029,6 +1107,104 @@ class MainWindow(QMainWindow):
         # The picture is about to be somewhere else; take the cover with it.
         QTimer.singleShot(140, lambda: self.transition.retarget(self._video_rect()))
 
+    # --- movie night --------------------------------------------------------
+
+    def party_session(self):
+        """This window's movie night (app/party/session.py): made the first
+        time anything needs it, or two seconds after start (see __init__)."""
+        if self._party is None:
+            from ..party.session import PartySession
+
+            self._party = PartySession(self)
+            self._party.changed.connect(self._on_party_changed)
+            # Most sentences land in a dialog that is open for them. One that
+            # comes later (the film would not open for a guest, say) still needs
+            # somewhere to go, and the top bar's line is on every page.
+            self._party.error.connect(self._on_status)
+        return self._party
+
+    def start_movie_night(self, item) -> None:
+        """Start movie night, from a film's page, an episode, or the player: the
+        host's panel, ready to start (or the movie night already on)."""
+        if item is None or not getattr(item, "id", 0):
+            return
+        dialog = self._host_panel()
+        dialog.prepare(item)
+        self._show_dialog(dialog)
+
+    def continue_movie_night(self, row) -> None:
+        """Continue, on Home: the same party, from where it got to, with a new
+        code for the friends (the certificate is made fresh every time)."""
+        fresh = db.get_media(int(row["media_id"])) if row["media_id"] else None
+        if fresh is None or fresh["missing"]:
+            self._on_status("That movie night's film is no longer in the library.")
+            self.home.movie_nights.reload()
+            return
+        dialog = self._host_panel()
+        dialog.start(MediaItem.from_row(fresh), party_id=str(row["party_id"]),
+                     start_at=float(row["position"] or 0.0))
+        self._show_dialog(dialog)
+
+    def join_movie_night(self) -> None:
+        dialog = self._join_panel()
+        dialog.open_fresh()
+        self._show_dialog(dialog)
+
+    def show_movie_night(self) -> None:
+        """The top bar's button and the player's: the panel of the movie night
+        that is on, or Join when none is."""
+        if self.party_session().role == "host":
+            dialog = self._host_panel()
+            dialog.show_running()
+            self._show_dialog(dialog)
+        else:
+            self.join_movie_night()
+
+    def _host_panel(self) -> HostDialog:
+        if self._host_dialog is None:
+            self._host_dialog = HostDialog(self.party_session(), self)
+            self._host_dialog.settings_requested.connect(self._open_movie_night_settings)
+        return self._host_dialog
+
+    def _join_panel(self) -> JoinDialog:
+        if self._join_dialog is None:
+            self._join_dialog = JoinDialog(self.party_session(), self)
+        return self._join_dialog
+
+    def _show_dialog(self, dialog) -> None:
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_party_changed(self) -> None:
+        session = self._party
+        role = session.role if session is not None else None
+        if role == "host":
+            tooltip = "Movie night: you're hosting. Click for the invite code."
+        elif role == "guest":
+            host = session.host_name
+            tooltip = f"Movie night: you're in {host}'s" if host else "Movie night: joining…"
+        else:
+            tooltip = "Movie night: join a friend's with their code"
+        self._party_button.set_live(role is not None, tooltip)
+
+    def _forget_movie_night(self, party_id: str) -> None:
+        db.forget_party(party_id)
+        self.home.movie_nights.reload()
+
+    def _may_end_movie_night(self, quitting: bool) -> bool:
+        """Whether leaving may end the movie night this window hosts: yes at once
+        with nobody else in it (or none on), and with friends in only if the
+        host says so (party_dialog.ask_to_end). A guest's own leaving is theirs
+        alone and is not asked about."""
+        if self._party is None:
+            return True             # never made: no movie night has been near this window
+        return ask_to_end(self, self._party, quitting=quitting)
+
+    def _open_movie_night_settings(self) -> None:
+        self._on_nav(_NAV_SETTINGS)
+        self.settings_page.show_movie_night()
+
     # --- library ------------------------------------------------------------
 
     def _initial_scan(self) -> None:
@@ -1124,8 +1300,17 @@ class MainWindow(QMainWindow):
         # Closing while music plays sends Mistery to the tray instead: that is
         # the whole point of background playback. With nothing playing, close
         # means quit — an invisible app lingering for no reason is a surprise.
-        if (not self._quitting and self.music.is_playing and self.tray.available
-                and settings.get("close_to_tray", True)):
+        to_tray = (not self._quitting and self.music.is_playing and self.tray.available
+                   and settings.get("close_to_tray", True))
+        # Either way a movie night this window hosts ends with it (the film
+        # closes, even on the way to the tray), for every friend in it. So it
+        # asks first, as End movie night, Esc and Back do; not when Windows is
+        # signing out (_quitting, set on commitDataRequest in main.py), which
+        # must never meet a question.
+        if not self._quitting and not self._may_end_movie_night(quitting=not to_tray):
+            event.ignore()
+            return
+        if to_tray:
             event.ignore()
             self.go_to_tray()
             return
@@ -1149,6 +1334,11 @@ class MainWindow(QMainWindow):
         # scan stage (an ffprobe, a metadata retry) to finish, and a window that
         # stays up frozen for that long looks like a hang rather than a quit.
         self.hide()
+        # The movie night before the player: its guests are told, the listener
+        # closes and the router gets its port back, all before this returns
+        # (a few seconds at most, for a router that has stopped answering).
+        if self._party is not None:
+            self._party.shutdown()
         self.player.shutdown()
         self.music.shutdown()
         self.service.shutdown()

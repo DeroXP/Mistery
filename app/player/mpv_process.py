@@ -325,6 +325,14 @@ class MpvProcess(QObject):
         self._ipc_path = rf"\\.\pipe\mistery-{token}" if _IS_WINDOWS else f"/tmp/mistery-{token}"
 
         wanted = [*self._base_arguments(window_id), *(extra_args or [])]
+        if os.environ.get("MISTERY_NO_AUDIO") and not any(a.startswith("--ao=") for a in wanted):
+            # Set by the test harnesses, for every run and every Mistery a test
+            # starts. --mute was not enough: the music player re-applies the
+            # saved mute as each song starts, so a test's --mute=yes lasted until
+            # then and the song came through at full volume. The null output still
+            # plays in real time and keeps volume, mute and the device list, but
+            # nothing reaches a speaker, whatever the app sets afterwards.
+            wanted.append("--ao=null")
         accepted, dropped = filter_supported(wanted, mpv_path)
         if dropped:
             self.log_message.emit(f"[mistery] mpv does not support: {' '.join(dropped)}")

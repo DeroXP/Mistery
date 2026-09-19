@@ -436,12 +436,13 @@ def test_service_with_release() -> None:
         check("the warning points at the checksum further down",
               'href="#checksum"' in home.text and 'id="checksum"' in home.text)
         # 444.7 MB measured from the real build on 2026-09-17: 179.0 of app and
-        # updater, 254.4 of mpv and ffmpeg, 11.3 of uninstaller. "About 300 MB"
+        # updater, 254.4 of mpv and ffmpeg, 11.3 of uninstaller; 1.2.0's app is
+        # 10.7 MB more (movie night's cryptography), so 455.4. "About 300 MB"
         # was a guess made before there was an installer to measure.
         check("the page does not still claim 300 MB on disk",
               "300 MB on disk" not in flat)
         check("the page says about what the install really costs",
-              "425 MB on disk" in flat)
+              "435 MB on disk" in flat)
         check("there is no JavaScript on the page", "<script" not in home.text.lower())
         check("nothing is loaded from another origin",
               "http://" not in home.text.replace("http://www.w3.org", "")

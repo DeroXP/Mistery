@@ -86,6 +86,7 @@ class _Backdrop(QWidget):
 class DetailView(QWidget):
     play_requested = Signal(object, float)
     play_in_vr_requested = Signal(object)
+    movie_night_requested = Signal(object)      # watch this with friends (app/ui/party_dialog.py)
     back_requested = Signal()
     open_show = Signal(int)
     media_changed = Signal()
@@ -170,7 +171,7 @@ class DetailView(QWidget):
         info.addSpacing(12)
         info.addLayout(self._badges)
 
-        # Five buttons at streaming-app proportions overflow a narrow window,
+        # Six buttons at streaming-app proportions overflow a narrow window,
         # so let the row wrap instead of running off the edge.
         button_row = QWidget()
         # Without this the parent layout ignores heightForWidth and the wrapped
@@ -193,6 +194,14 @@ class DetailView(QWidget):
         self._restart.setCursor(Qt.CursorShape.PointingHandCursor)
         self._restart.clicked.connect(lambda: self.play_requested.emit(self._item, 0.0))
         buttons.addWidget(self._restart)
+
+        self._party = QPushButton("Start movie night")
+        self._party.setObjectName("Ghost")
+        self._party.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._party.setToolTip("Watch this with friends who have Mistery, in sync. Your own "
+                               "place in it stays where it is.")
+        self._party.clicked.connect(lambda: self.movie_night_requested.emit(self._item))
+        buttons.addWidget(self._party)
 
         self._vr = QPushButton("Play in VR")
         self._vr.setObjectName("Ghost")

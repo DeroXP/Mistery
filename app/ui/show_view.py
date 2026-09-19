@@ -14,6 +14,7 @@ from ..util import elide, fmt_duration
 from .detail_view import _Backdrop
 from .theme import C
 from .widgets.artview import ArtView
+from .widgets.cards import set_extra_actions
 from .widgets.chips import CategoryEditor
 from .widgets.icons import IconButton
 from .widgets.rows import CardGrid
@@ -21,6 +22,7 @@ from .widgets.rows import CardGrid
 
 class ShowView(QWidget):
     play_requested = Signal(object, float)
+    movie_night_requested = Signal(object)      # an episode to watch with friends
     item_action = Signal(str, object)
     open_media = Signal(object)
     back_requested = Signal()
@@ -107,6 +109,16 @@ class ShowView(QWidget):
         self._play.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play.clicked.connect(self._play_next_up)
         buttons.addWidget(self._play)
+        # Opens on your next episode; the dialog picks any other, because the
+        # friends' place in a show is often not yours. Each episode's card menu
+        # has it too.
+        self._party = QPushButton("Start movie night")
+        self._party.setObjectName("Ghost")
+        self._party.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._party.setToolTip("Watch an episode with friends who have Mistery, in sync. Your "
+                               "own place in the show stays where it is.")
+        self._party.clicked.connect(self._movie_night)
+        buttons.addWidget(self._party)
         buttons.addStretch(1)
 
         content_layout.addWidget(self._backdrop)
@@ -193,6 +205,7 @@ class ShowView(QWidget):
             label = "Resume" if next_up.resume_position > 0 else "Play"
             self._play.setText(f"{label}  {next_up.code}".strip())
         self._play.setVisible(next_up is not None)
+        self._party.setVisible(next_up is not None)
 
         self._render_episodes()
 
@@ -220,7 +233,14 @@ class ShowView(QWidget):
         if episode is not None:
             self.play_requested.emit(episode, episode.resume_position)
 
+    def _movie_night(self) -> None:
+        episode = self._next_up()
+        if episode is not None:
+            self.movie_night_requested.emit(episode)
+
     def _render_episodes(self) -> None:
         season = self._season_group.checkedId()
         episodes = [e for e in self._episodes if e.season == season] or self._episodes
         self._grid.set_items(episodes, "No episodes in this season")
+        # item_action("party", episode) reaches MainWindow like every other entry.
+        set_extra_actions(self._grid, [("Start movie night", "party")])

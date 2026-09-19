@@ -1,18 +1,219 @@
-"""Home: hero banner, Continue Watching, then the library as a grid."""
+"""Home: hero banner, Continue Watching, Movie nights, then the library as a grid."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
-    QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .. import db
 from ..config import settings
 from ..models import MediaItem, ShowItem
+from ..util import fmt_clock, progress_fraction
+from .party_dialog import and_list, when_text
 from .theme import C
+from .widgets.artview import ArtView
+from .widgets.flow import FlowLayout
 from .widgets.hero import HeroBanner
 from .widgets.rows import CardGrid, CardRow
+
+# How many movie nights Home lists: the most recent, one card each.
+_MOVIE_NIGHTS = 8
+_CARD_W = 540
+
+
+class _PartyArt(ArtView):
+    """The still of what a movie night watched, with how far it got along the
+    bottom, the way Continue Watching shows it."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(176, 99, radius=6, parent=parent)
+        self.fraction = 0.0
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.fraction <= 0.001:
+            return
+        painter = QPainter(self)
+        painter.setPen(Qt.PenStyle.NoPen)
+        track = QRectF(0, self.height() - 4.0, self.width(), 4.0)
+        painter.setBrush(QColor(90, 90, 90, 220))
+        painter.drawRect(track)
+        painter.setBrush(QColor(C.ACCENT))
+        painter.drawRect(QRectF(0, track.top(), track.width() * max(0.02, self.fraction), 4.0))
+
+
+class PartyCard(QFrame):
+    """One movie night on Home: what it watched, who came, where it got to.
+
+    The host can Continue it: same party, same place, and a fresh code for the
+    friends. A guest's card says who can, because the film is on their PC.
+    """
+
+    continue_requested = Signal(object)         # the party's newest party_progress row
+    forget_requested = Signal(str)              # party_id
+
+    def __init__(self, row, me: str, parent=None) -> None:
+        super().__init__(parent)
+        from ..party import people
+
+        self.row = row
+        self.setObjectName("Card")
+        # Two to a row in the default 1440 px window, three from about 1760:
+        # a movie night is known by what it watched, so the title gets the room.
+        self.setFixedSize(QSize(_CARD_W, 131))
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 14, 16, 14)
+        layout.setSpacing(16)
+
+        media_id = row["media_id"]
+        fresh = db.get_media(int(media_id)) if row["role"] == "host" and media_id else None
+        item = MediaItem.from_row(fresh) if fresh is not None and not fresh["missing"] else None
+        self.item = item
+        self.art = _PartyArt()
+        self.art.set_art(item.wide_art if item else None, row["title"] or "Movie night")
+        self.art.fraction = progress_fraction(row["position"], row["duration"])
+        layout.addWidget(self.art, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        text = QVBoxLayout()
+        text.setSpacing(3)
+        self.title = QLabel()
+        self.title.setStyleSheet(f"color: {C.TEXT}; font-size: 10.5pt; font-weight: 700;")
+        self.title.setToolTip(row["title"] or "")
+        text.addWidget(self.title)
+
+        members = people.parse_members(row["members"])
+        host_id = str(row["media_key"] or "").split(":", 1)[0]
+        host = next((p.name for p in members if p.id == host_id), "")
+        others = [p.name for p in members if p.id != me and p.id != host_id]
+        if row["role"] == "host":
+            who = f"With {and_list(others)}" if others else "Nobody else joined"
+        else:
+            who = (f"{host}'s movie night" if host else "A friend's movie night") + (
+                f", with {and_list(others)}" if others else "")
+        self.who = QLabel()
+        self.who.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 9.5pt;")
+        self.who.setToolTip(who)
+        self._words = {self.title: row["title"] or "Movie night", self.who: who}
+        text.addWidget(self.who)
+
+        where = f"Got to {fmt_clock(row['position'])}"
+        if row["duration"]:
+            where += f" of {fmt_clock(row['duration'])}"
+        when = when_text(row["updated_at"])
+        self.where = QLabel(where + (f"  ·  {when}" if when else ""))
+        self.where.setStyleSheet(f"color: {C.TEXT_FAINT}; font-size: 9pt;")
+        text.addWidget(self.where)
+        text.addStretch(1)
+
+        self.action = None
+        if row["role"] == "host" and item is not None:
+            self.action = QPushButton("Continue")
+            self.action.setObjectName("Chip")
+            self.action.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.action.setToolTip("Start this movie night again where it got to. Friends get "
+                                   "a new code.")
+            self.action.clicked.connect(lambda: self.continue_requested.emit(self.row))
+            text.addWidget(self.action, 0, Qt.AlignmentFlag.AlignLeft)
+        else:
+            note = QLabel("The file is no longer in your library" if row["role"] == "host"
+                          else f"{host or 'The host'} can continue it")
+            note.setStyleSheet(f"color: {C.TEXT_FAINT}; font-size: 8.5pt;")
+            text.addWidget(note)
+        layout.addLayout(text, 1)
+
+    def showEvent(self, event) -> None:
+        """Titles are cut to fit here, where the labels have the font they
+        paint with: cut when the card was made, the measure was the plain
+        font's, and "Breaking Bad — S01E03 · ...and the Bag's in the River"
+        lost its last letters with no "…" to say so."""
+        super().showEvent(event)
+        width = _CARD_W - 14 - 176 - 16 - 16          # the text column: card less margins, art, gap
+        for label, words in self._words.items():
+            label.setText(label.fontMetrics().elidedText(words, Qt.TextElideMode.ElideRight, width))
+
+    def contextMenuEvent(self, event) -> None:
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        if self.action is not None:
+            menu.addAction("Continue movie night", lambda: self.continue_requested.emit(self.row))
+            menu.addSeparator()
+        menu.addAction("Remove from Movie nights",
+                       lambda: self.forget_requested.emit(str(self.row["party_id"])))
+        menu.exec(event.globalPos())
+
+
+class MovieNights(QWidget):
+    """Home's Movie nights: the recent parties, and the way into a friend's.
+
+    Always there, even before the first movie night, because Join has to be
+    findable from Home: then it is one line and the button.
+    """
+
+    continue_requested = Signal(object)         # a party_progress row
+    forget_requested = Signal(str)
+    join_requested = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        title = QLabel("Movie nights")
+        title.setObjectName("SectionTitle")
+        header.addWidget(title)
+        self.hint = QLabel()
+        self.hint.setObjectName("SectionHint")
+        header.addWidget(self.hint)
+        header.addStretch(1)
+        self.join = QPushButton("Join a movie night")
+        self.join.setObjectName("Chip")
+        self.join.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.join.setToolTip("Watch a friend's film with them: paste the code they sent you")
+        self.join.clicked.connect(self.join_requested.emit)
+        header.addWidget(self.join)
+        layout.addLayout(header)
+
+        self.empty = QLabel("Watch something from your library with friends who have Mistery, "
+                            "in sync. Start one from a film's page, or join a friend's with the "
+                            "code they send you.")
+        self.empty.setWordWrap(True)
+        self.empty.setStyleSheet(f"color: {C.TEXT_FAINT}; font-size: 9.5pt;")
+        layout.addWidget(self.empty)
+
+        grid = QWidget()
+        self.flow = FlowLayout(grid, margin=0, h_spacing=16, v_spacing=16)
+        layout.addWidget(grid)
+        self.cards: list[PartyCard] = []
+
+    def reload(self) -> None:
+        from ..party import people
+
+        newest: dict[str, object] = {}
+        for row in db.recent_parties(_MOVIE_NIGHTS * 6):
+            # One card a movie night, for the last thing it watched: a night of
+            # three episodes is one night, not three.
+            if row["party_id"] not in newest:
+                newest[row["party_id"]] = row
+            if len(newest) >= _MOVIE_NIGHTS:
+                break
+        self.flow.clear()
+        self.cards = []
+        me = people.person_id() if newest else ""
+        for row in newest.values():
+            card = PartyCard(row, me)
+            card.continue_requested.connect(self.continue_requested.emit)
+            card.forget_requested.connect(self.forget_requested.emit)
+            self.flow.addWidget(card)
+            self.cards.append(card)
+        self.empty.setVisible(not newest)
+        self.hint.setText(str(len(newest)) if newest else "")
+        self.hint.setVisible(bool(newest))
+
 
 
 class HomeView(QWidget):
@@ -62,6 +263,10 @@ class HomeView(QWidget):
         self.next_up_row = CardRow("Next Up", wide=True)
         self._connect(self.next_up_row)
         self._body.addWidget(self.next_up_row)
+
+        # MainWindow connects its signals: Join, Continue and Remove.
+        self.movie_nights = MovieNights()
+        self._body.addWidget(self.movie_nights)
 
         self.movies_grid = CardGrid("Movies")
         self._connect(self.movies_grid)
@@ -131,6 +336,7 @@ class HomeView(QWidget):
 
         next_up = [MediaItem.from_row(r) for r in db.next_up()]
         self.next_up_row.set_items(next_up)
+        self.movie_nights.reload()
 
         self.movies_grid.set_items(movies)
         self.movies_grid.setVisible(bool(movies))

@@ -295,6 +295,26 @@ CREATE TABLE IF NOT EXISTS playlist_items (
 CREATE INDEX IF NOT EXISTS idx_playlist_items ON playlist_items(playlist_id, position);
 CREATE INDEX IF NOT EXISTS idx_playlists_kind ON playlists(kind, name);
 
+-- Where a movie night got to, kept apart from `progress` on purpose: watching
+-- episode 3 with friends must not move your own place in the series, which may
+-- be episode 7. One row per party and thing watched, on every side of it — the
+-- host keeps one and so does each guest, who has no media row of their own.
+-- party_id is random per movie night, and reused when the host continues one.
+CREATE TABLE IF NOT EXISTS party_progress (
+    id          INTEGER PRIMARY KEY,
+    party_id    TEXT NOT NULL,
+    media_key   TEXT NOT NULL,                     -- "<host person id>:<host media id>"
+    media_id    INTEGER,                           -- the host's own media row; NULL for a guest
+    title       TEXT,                              -- as the host described it
+    members     TEXT,                              -- JSON [{"id", "name"}] of everyone who came
+    role        TEXT NOT NULL,                     -- host | guest
+    position    REAL NOT NULL DEFAULT 0,
+    duration    REAL,
+    updated_at  REAL,
+    UNIQUE(party_id, media_key)
+);
+CREATE INDEX IF NOT EXISTS idx_party_recent ON party_progress(updated_at);
+
 CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album_id, disc_no, track_no);
 CREATE INDEX IF NOT EXISTS idx_tracks_state  ON tracks(state, missing);
 CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(sort_artist, year);
@@ -1019,6 +1039,42 @@ def playlist_media(playlist_id: int) -> list[sqlite3.Row]:
         for row in query(f"{MEDIA_WITH_PROGRESS} WHERE m.id IN ({marks}) AND {READY}", chunk):
             found[int(row["id"])] = row
     return [found[item_id] for item_id in ids if item_id in found]
+
+
+# --- movie night --------------------------------------------------------------
+#
+# A movie night's place in what it is watching. Never read or written by the
+# ordinary progress code above, and never the other way round: that separation
+# is the whole point of the table.
+
+def save_party_progress(party_id: str, media_key: str, *, role: str, position: float,
+                        duration: float | None = None, media_id: int | None = None,
+                        title: str | None = None, members: str | None = None) -> None:
+    """Record where a party got to. One row per (party, thing watched)."""
+    execute(
+        "INSERT INTO party_progress (party_id, media_key, media_id, title, members, role, "
+        "position, duration, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(party_id, media_key) DO UPDATE SET "
+        "position = excluded.position, duration = COALESCE(excluded.duration, duration), "
+        "title = COALESCE(excluded.title, title), members = COALESCE(excluded.members, members), "
+        "media_id = COALESCE(excluded.media_id, media_id), updated_at = excluded.updated_at",
+        (party_id, media_key, media_id, title, members, role, float(position),
+         duration, time.time()),
+    )
+
+
+def party_progress(party_id: str, media_key: str) -> sqlite3.Row | None:
+    return query_one("SELECT * FROM party_progress WHERE party_id = ? AND media_key = ?",
+                     (party_id, media_key))
+
+
+def recent_parties(limit: int = 20) -> list[sqlite3.Row]:
+    """Movie nights, most recent first: one row per party and thing watched."""
+    return query("SELECT * FROM party_progress ORDER BY updated_at DESC LIMIT ?", (limit,))
+
+
+def forget_party(party_id: str) -> None:
+    execute("DELETE FROM party_progress WHERE party_id = ?", (party_id,))
 
 
 # --- http cache -------------------------------------------------------------

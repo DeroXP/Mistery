@@ -6,3 +6,7 @@ mutagen>=1.47
 # a build without numpy has no music player at all. It was missing from here;
 # the frozen build is where that stopped being survivable.
 numpy>=1.26
+# Movie night encrypts the stream between you and your friends with a
+# certificate made fresh for each session and pinned in the invite code.
+# The standard library can speak TLS but cannot make a certificate.
+cryptography>=42
