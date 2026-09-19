@@ -263,12 +263,12 @@ def _hero(config: Config, current: Current | None) -> str:
 
 def _requirements() -> str:
     # "About 300 MB" was a guess made before there was an installer to measure.
-    # The install is 455.4 MB, which Windows counts in 1024s and reports as
-    # 434 MB in Add/Remove Programs: 189.7 MB of frozen app and updater,
-    # 254.4 MB of mpv and ffmpeg unpacked from a 101.0 MB download, and the
-    # 11.3 MB uninstaller. Measured on 2026-09-17 from the real build; 1.2.0's
-    # app is 10.7 MB bigger (measured on 2026-09-19), nearly all of it the
-    # cryptography package movie night makes its certificates with. The tool
+    # The install is 459.7 MB, which Windows counts in 1024s and reports as
+    # 438 MB in Add/Remove Programs: 194 MB of frozen app and updater (the
+    # release build of 1.2.0 says so: "84.6 MB zipped from 194 MB"; the app
+    # alone is 185.0 MB, and movie night's cryptography package is most of
+    # what 1.2.0 added), 254.4 MB of mpv and ffmpeg unpacked from a 101.0 MB
+    # download, and the 11.3 MB uninstaller, measured on 2026-09-17. The tool
     # halves are the constants in packaging/installer/tool_downloads.py, which
     # are themselves measured. Say the number a stranger will see on their own
     # machine, and round it up rather than down.
@@ -280,8 +280,8 @@ def _requirements() -> str:
     machine-wide, and updates need no prompt either.</p>
   </div>
   <div>
-    <h3>About 435 MB on disk</h3>
-    <p>180 MB of app, and 250 MB of mpv and ffmpeg, which the installer fetches from their
+    <h3>About 440 MB on disk</h3>
+    <p>185 MB of app, and 250 MB of mpv and ffmpeg, which the installer fetches from their
     own projects during setup — a 100 MB download — rather than shipping copies of them.</p>
   </div>
   <div>
