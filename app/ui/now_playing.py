@@ -521,7 +521,7 @@ _CONTEXT_CAPTIONS = {
 
 
 class PlayingFrom(QWidget):
-    """"PLAYING FROM ALBUM / Die Lit" at the top of Now Playing, and a way back there.
+    """"PLAYING FROM ALBUM / Neon Hours" at the top of Now Playing, and a way back there.
 
     An album or an artist opens its page; your queue opens Up next; anything
     else (Liked Songs, Songs, a search) is handed to the window as
@@ -935,7 +935,7 @@ class LyricsView(QWidget):
         """How long a line is probably being sung for: a word takes about half a
         second, and slow songs stretch their lines, so never less than a third of
         the time to the next one. Measured against this library's synced lyrics:
-        Deftones lines 13 s apart are often sung for 5 s or more."""
+        lines 13 s apart are often sung for 5 s or more."""
         words = len(text.split())
         return max(1.2 + 0.5 * words, 0.35 * interval)
 

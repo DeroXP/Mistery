@@ -1,7 +1,7 @@
 """Turn scene-release filenames into clean titles, years and episode numbers.
 
-    Spider-Man.2.2004.2160p.BluRayRip.EAC3.5.1.HDR.x265-Groupless[TGx]
-        -> title="Spider-Man 2", year=2004, tags={4K, BluRay, HEVC, EAC3, 5.1, HDR}
+    Night.Train.2.2019.2160p.BluRayRip.EAC3.5.1.HDR.x265-NOGRP[A1B2]
+        -> title="Night Train 2", year=2019, tags={4K, BluRay, HEVC, EAC3, 5.1, HDR}
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ _BARE_EPISODE_RE = re.compile(r"^e(\d{1,3})(?:v\d)?(?![a-z0-9])", re.IGNORECASE)
 # could be a stray token, so parse() only accepts it when a folder above the
 # file supplies the season ("Season 02", "Show Name S02").
 _MID_EPISODE_RE = re.compile(r"(?<=[.\s_\-])e(\d{1,3})(?:v\d)?(?![a-z0-9])", re.IGNORECASE)
-# Anime numbering: "Dandadan - 01", with no season anywhere in the name. Two or
+# Anime numbering: "Starbound - 01", with no season anywhere in the name. Two or
 # more digits is deliberate — releases zero-pad, and accepting a single digit
 # would turn "Kill Bill - 2" into an episode. The trailing guard keeps it off
 # "- 1080p"; a re-released episode carries a revision, "- 12v2". Four digits
@@ -169,14 +169,14 @@ _SEASON_DIR_RE = re.compile(
     r"|(\d{1,2})(?:st|nd|rd|th)[.\-\s_]*(?:season|series))$",
     re.IGNORECASE,
 )
-# A season marker tacked onto the end of a series folder: "Breaking Bad S01",
-# and the form anime uses: "Dandadan 1st Season".
+# A season marker tacked onto the end of a series folder: "Harbor Lights S01",
+# and the form anime uses: "Starbound 1st Season".
 _SEASON_SUFFIX_RE = re.compile(
     r"[.\s_-]+(?:(?:season|series|s)[.\s_-]*(\d{1,2})"
     r"|(\d{1,2})(?:st|nd|rd|th)[.\s_-]*(?:season|series))\s*$",
     re.IGNORECASE,
 )
-# A leading release group: "[Anime Time] Dandadan - 01", "[SubsPlease] Show - 12".
+# A leading release group: "[Anime Time] Starbound - 01", "[SubsPlease] Show - 12".
 _LEADING_GROUP_RE = re.compile(r"^\s*(?:\[[^\]]*\]|\([^)]*\))\s*")
 
 _SAMPLE_RE = re.compile(r"(?<![a-z])sample(?![a-z])", re.IGNORECASE)
@@ -417,7 +417,7 @@ def parse(path: str | Path) -> ParsedName:
         _, _, folder_season = _title_from_folders(path)
         season = folder_season
 
-    # "Dandadan 2nd Season - 01" carries the season in the title itself, which
+    # "Starbound 2nd Season - 01" carries the season in the title itself, which
     # would otherwise split one show into one per season. Episodes only, so a
     # film whose name happens to end in a number is left alone.
     if episode is not None:
@@ -447,8 +447,8 @@ def _title_from_folders(path: Path) -> tuple[str | None, int | None, int | None]
 
     Handles the three layouts that actually turn up on disk:
 
-        Breaking Bad S01/S01E01 - Pilot.mkv     season suffix on the folder
-        Breaking Bad/Season 01/S01E01.mkv       a pure season folder to skip
+        Harbor Lights S01/S01E01 - Pilot.mkv    season suffix on the folder
+        Harbor Lights/Season 01/S01E01.mkv      a pure season folder to skip
         Some.Movie.2019/movie.mkv               plain release folder
 
     Returns (title, year, season); any of them may be None.

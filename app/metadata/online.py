@@ -315,7 +315,7 @@ def wikipedia_article(title: str, year: int | None) -> dict | None:
     Search first, then verify. Guessing article titles took up to ten requests
     for a film with no article and got us rate-limited; searching costs one
     request and handles punctuation a filename could not represent (a colon in
-    "Spider-Man: Across the Spider-Verse" becomes " - " on disk).
+    "Night Train: First Light" becomes " - " on disk).
 
     Separate from wikipedia_movie because the categories lookup wants the same
     article for its `wikibase_item` and the month-long cache makes the second
@@ -465,7 +465,7 @@ def _itunes_trim(data):
     """The four fields itunes_movie_categories reads, and nothing else.
 
     A limit=50 reply is mostly artwork URLs, prices, long descriptions and store
-    ids that nothing here looks at: "The Amazing Spider-Man 2" came back as
+    ids that nothing here looks at: one blockbuster sequel came back as
     102,371 bytes, against 2.5-4.6 KB for a Wikipedia row and 1.2-3.2 KB for a
     Wikidata one. http_cache is written for a month and never pruned — nothing
     in app/ deletes an expired row and there is no VACUUM — so every film
@@ -492,7 +492,7 @@ def itunes_movie_categories(title: str, year: int | None) -> list[str]:
     2026-09-17), while the same search unfiltered still comes back with
     `kind: feature-movie` rows. Films are picked out of the mixed results here
     instead, and only an exact title with a matching year counts — the store's
-    ranking happily offers "Spider-Man: Brand New Day" for "Spider-Man 3".
+    ranking happily offers "Night Train: First Light" for "Night Train 3".
     """
     data = _get_json("https://itunes.apple.com/search", {"term": title, "limit": 50},
                      trim=_itunes_trim)

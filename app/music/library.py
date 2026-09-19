@@ -28,7 +28,7 @@ from . import art, loudness, tags
 _log = logging.getLogger("music")
 
 _ARTICLES = ("the ", "a ", "an ")
-# "Deftones - Around the Fur (1997 Rock) [Flac 24-96]"
+# "Fiveleaf - Winter Coat (1997 Rock) [Flac 24-96]"
 _FOLDER_RE = re.compile(r"^\s*(?P<artist>.+?)\s+-\s+(?P<album>.+?)\s*(?:[\(\[].*)?$")
 _YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 

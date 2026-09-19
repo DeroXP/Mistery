@@ -212,20 +212,20 @@ def check_library(fix: bool) -> None:
 # --- parser -----------------------------------------------------------------
 
 _PARSER_CASES = [
-    (r"C:\M\Spider-Man.2.2004.2160p.BluRayRip.EAC3.5.1.HDR.x265-Groupless[TGx]\Spider-Man.2.2004.2160p.mkv",
-     "Spider-Man 2", None, None),
-    (r"C:\M\Breaking Bad S01\S01E01 - Pilot.mkv", "Breaking Bad", 1, 1),
-    (r"C:\M\Breaking Bad S05\S05E14 - Ozymandias.mkv", "Breaking Bad", 5, 14),
-    (r"D:\TV\Breaking Bad\Season 02\S02E03 - Bit by a Dead Bee.mkv", "Breaking Bad", 2, 3),
-    (r"D:\TV\The Wire\Season 1\E05 - The Pager.mkv", "The Wire", 1, 5),
-    (r"D:\TV\Severance.S02E07.Chikhai.Bardo.2160p.WEB-DL.mkv", "Severance", 2, 7),
+    (r"C:\M\Night.Train.2.2019.2160p.BluRayRip.EAC3.5.1.HDR.x265-NOGRP[A1B2]\Night.Train.2.2019.2160p.mkv",
+     "Night Train 2", None, None),
+    (r"C:\M\Harbor Lights S01\S01E01 - Pilot.mkv", "Harbor Lights", 1, 1),
+    (r"C:\M\Harbor Lights S05\S05E14 - The Long Night.mkv", "Harbor Lights", 5, 14),
+    (r"D:\TV\Harbor Lights\Season 02\S02E03 - Low Tide.mkv", "Harbor Lights", 2, 3),
+    (r"D:\TV\Northfield\Season 1\E05 - The Signal.mkv", "Northfield", 1, 5),
+    (r"D:\TV\Quiet.Hours.S02E07.Deep.Water.2160p.WEB-DL.mkv", "Quiet Hours", 2, 7),
     (r"D:\TV\Firefly - 1x04 - Shindig.avi", "Firefly", 1, 4),
     (r"D:\Movies\2012.2009.1080p.BluRay.x264.mkv", "2012", None, None),
     (r"D:\Movies\Blade Runner 2049 (2017) [2160p] [HDR].mkv", "Blade Runner 2049", None, None),
     (r"D:\Movies\Se7en (1995)\Se7en.1995.1080p.mkv", "Se7en", None, None),
     # Anime revisions, four-digit absolute numbers, a mid-name E-number in a
     # season folder, and the film names those rules must leave alone.
-    (r"D:\Anime\[SubsPlease] Dandadan - 12v2 (1080p) [0F1E2D3C].mkv", "Dandadan", 1, 12),
+    (r"D:\Anime\[SubsPlease] Starbound - 12v2 (1080p) [0F1E2D3C].mkv", "Starbound", 1, 12),
     (r"D:\Anime\One Piece\[SubsPlease] One Piece - 1071 (1080p) [5A1B2C3D].mkv", "One Piece", 1, 1071),
     (r"D:\TV\Show Name\Season 02\Show.Name.E05.1080p.WEB-DL.mkv", "Show Name", 2, 5),
     (r"D:\Movies\The Movie - 10 Years Later (2019).mkv", "The Movie - 10 Years Later", None, None),
@@ -255,7 +255,7 @@ def check_parser() -> None:
         print(f"          also: {extra}")
 
     keys = {parser.show_key(parser.parse(
-        rf"C:\M\Breaking Bad S{s:02d}\S{s:02d}E{e:02d} - Title.mkv").title, None)
+        rf"C:\M\Harbor Lights S{s:02d}\S{s:02d}E{e:02d} - Title.mkv").title, None)
         for s in range(1, 6) for e in range(1, 8)}
     check("episodes group into one show", PASS if len(keys) == 1 else FAIL,
           f"{len(keys)} distinct key(s)")

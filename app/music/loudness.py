@@ -1,7 +1,7 @@
 """How loud a song actually is, so every album plays at the same level.
 
-Downloaded albums disagree wildly about loudness. In this library the Deftones
-FLACs carry ReplayGain tags asking for −11 to −13 dB while the Die Lit MP3s
+Downloaded albums disagree wildly about loudness. In this library some albums'
+FLACs carry ReplayGain tags asking for −11 to −13 dB while other albums' MP3s
 carry none, so the same volume knob played one album twelve decibels below the
 other. ReplayGain also aims at a 1990s reference level that is far below what
 streaming services use today, which is why everything sounded quiet.

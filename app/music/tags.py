@@ -142,7 +142,7 @@ def read(path: str | Path) -> dict:
 
 
 def _title_from_filename(path: Path) -> str:
-    """'05. Deftones - Rickets' -> 'Rickets' when a file has no title tag."""
+    """'05. Fiveleaf - Low Tide' -> 'Low Tide' when a file has no title tag."""
     stem = re.sub(r"^\s*\d{1,3}\s*[.\-_)]\s*", "", path.stem)
     if " - " in stem:
         stem = stem.split(" - ", 1)[1]

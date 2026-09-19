@@ -943,8 +943,8 @@ Source chain, best available wins:
    episode stills, show poster, genres, rating) and **Wikipedia** for movies
    (poster and plot from the film's article). Wikipedia is searched rather than
    guessed at by article name: filenames can't contain `:`, so
-   `Harbor Lights - The Long Night` has to find
-   *Harbor Lights: The Long Night*. Both APIs are throttled to one
+   `Night Train - First Light` has to find
+   *Night Train: First Light*. Both APIs are throttled to one
    request per host per 0.8 s and back off on HTTP 429.
 3. **The file itself** — several frames are sampled, scored for brightness,
    detail and colour, and the best becomes the poster; HDR sources are

@@ -1,8 +1,8 @@
 """ffmpeg, for a friend who cannot take the original.
 
 A movie night sends the film as it is. This PC's upload measured 909 Mbit/s,
-and the heaviest film in its library needs 11.7 (Across the Spider-Verse, 4K
-HEVC with Dolby Vision): 1.3 % of the upload per friend. Re-encoding to save
+and the heaviest film in its library needs 11.7 (4K HEVC with Dolby
+Vision): 1.3 % of the upload per friend. Re-encoding to save
 upload would spend the host's GPU on making everyone's picture worse. What
 can fall short is on a friend's side: their download, or a PC that cannot
 decode 4K HEVC 10-bit or Dolby Vision smoothly. So each guest chooses for
@@ -18,7 +18,7 @@ first H.264 encoder that works here encodes. Measured on this PC (Core Ultra 9
     1080p 10-bit episode -> 1080p    0.2 of a core; flat out 17.7x real time
 
 and a guest's player is playing 1.2 s after it asks for the episode, and 1.0 to
-3.6 s for the Spider-Verse film: ffmpeg decodes from the film's previous
+3.6 s for the heaviest 4K film: ffmpeg decodes from the film's previous
 keyframe, and that film's are up to 8.5 s apart. With no GPU encoder, libx264
 costs 2.2 and 1.1 cores for the same two.
 Doing the scaling on the GPU as well (scale_cuda) saved 0.3 of a core on the
@@ -30,7 +30,7 @@ PQ read as ordinary video, or bands in every sky.
 
 Every audio track is kept (up to four), as AAC stereo, and every text subtitle
 track, so what you hear and read stays your own choice as it is with the
-original. Image subtitles (Blu-ray PGS) are not free: Breaking Bad's 23 tracks
+original. Image subtitles (Blu-ray PGS) are not free: one show's 23 tracks
 cost every guest 0.6 to 0.8 Mbit/s, for languages nobody at the party reads.
 So only those in the host's subtitle language go (Settings → Playback; the
 first two when none is), at most four. Fonts attached for styled subtitles are
@@ -60,8 +60,8 @@ QUALITIES = {
 }
 AUDIO_BITRATE = 160_000          # per track, AAC stereo
 # The encoders run variable bitrate, and on a grainy film they average above
-# their target: Breaking Bad's pilot, five minutes at 1080p, 8.8 Mbit/s of
-# video for an 8 Mbit/s target; the Spider-Man films stayed within 3%.
+# their target: a grainy episode, five minutes at 1080p, 8.8 Mbit/s of
+# video for an 8 Mbit/s target; the 4K films stayed within 3%.
 VBR_OVERSHOOT = 1.10
 _MAX_AUDIO = 4                   # an 8-language remux would add 1.3 Mbit/s
 _MAX_TEXT_SUBTITLES = 32         # a few KB a minute each
@@ -107,7 +107,7 @@ def resolve_quality(quality: str, size: int | None = None, duration: float | Non
 
     'auto' is the original, whatever the file needs. The rule this replaced
     (the original up to 10 Mbit/s, 1080p above) re-encoded the 11.7 Mbit/s
-    Spider-Verse film for a host whose 909 Mbit/s upload had room for it 77
+    4K film for a host whose 909 Mbit/s upload had room for it 77
     times over. The answer is only the default, for a guest who has not
     chosen: any guest can ask for another per request. An unknown length or
     setting is the original too, which costs the host nothing. `size` and

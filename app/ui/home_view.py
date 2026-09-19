@@ -127,7 +127,7 @@ class PartyCard(QFrame):
     def showEvent(self, event) -> None:
         """Titles are cut to fit here, where the labels have the font they
         paint with: cut when the card was made, the measure was the plain
-        font's, and "Breaking Bad — S01E03 · ...and the Bag's in the River"
+        font's, and "Harbor Lights — S01E03 · ...and the Signal in the Dark"
         lost its last letters with no "…" to say so."""
         super().showEvent(event)
         width = _CARD_W - 14 - 176 - 16 - 16          # the text column: card less margins, art, gap

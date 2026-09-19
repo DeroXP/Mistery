@@ -8,7 +8,7 @@ Sources, most trustworthy first:
 
 The middle one needs watching. Albums downloaded from blogs often carry a
 lyrics tag containing the blog's own address and nothing else — every song on
-Die Lit has "https://musicriders.blogspot.com/" in it — and a tag like that
+one album here carries that address and no words — and a tag like that
 would otherwise win over a real, synced set of lyrics and never be asked about
 again. So anything claiming to be lyrics has to read like lyrics first.
 
