@@ -558,7 +558,7 @@ background alongside the artwork pass — and then hands mpv one number per file
 | rock album C, FLAC, tagged | −11.7 | −18.0 | −13.2 |
 | **loudest to quietest** | | **10.0 dB** | **2.2 dB** |
 
-Koi No Yokan is the whole design in one row. It is a quiet master whose peaks
+Rock album C is the whole design in one row. It is a quiet master whose peaks
 already touch full scale, so it cannot be lifted to −11 without clipping, and
 its measured true peak stops the gain exactly where the clipping would start.
 Nothing is ever pushed past −1 dBFS: a song that still ends up quiet is one its
