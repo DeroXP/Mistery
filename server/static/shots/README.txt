@@ -5,13 +5,20 @@ The file name becomes the caption: 01-home-billboard.png shows as
 folder is empty the page has no screenshots section at all, on purpose:
 there is no mock-up standing in for one.
 
-Four that would cover it, and the names to use:
+The four here:
 
     01-home-billboard.png      Home, billboard and Continue Watching
     02-now-playing.png         a film playing, controls up
     03-lyrics-screensaver.png  the lyrics screensaver, mid-song
     04-music-library.png       the music library, albums in a grid
 
-They have to be the real app with a real library in it. /api/health
-reports how many were found, so you can tell from outside whether a
-deploy picked them up.
+They are the real app, 1600x900, taken with the window's own
+QWidget.grab() (and mpv's own screenshot for the video frame, which a
+grab cannot see into). The library in them is not: it is a stand-in
+built for these pictures, with invented titles, artwork drawn for them
+and lyrics written for them, so that a public page does not list what is
+on anybody's disk. Pictures of a real library would do just as well —
+these say the same thing about the app either way.
+
+/api/health reports how many were found, so you can tell from outside
+whether a deploy picked them up.
