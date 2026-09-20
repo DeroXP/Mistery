@@ -683,6 +683,11 @@ def test_screenshots() -> None:
         path.write_bytes(one_pixel)
         made.append(path)
     if len(made) != 2:
+        # Take back the one it did make. Leaving it is how a 70-byte "screenshot"
+        # reached the real site: this branch runs the moment a real picture is in
+        # the folder, which is exactly when somebody is about to publish it.
+        for path in made:
+            path.unlink(missing_ok=True)
         print("  skip  static/shots already holds pictures, which is the point of it")
         return
 
