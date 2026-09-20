@@ -665,6 +665,16 @@ def test_screenshots() -> None:
     one_pixel = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
         "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+    # Everything in this folder is published. A run killed before its `finally`
+    # leaves a fixture behind, and one of these did: a 70-byte "screenshot" went
+    # up on the real site and showed as a broken picture. They are byte-identical
+    # to the pixel above, so they can be recognised and swept without touching a
+    # real screenshot.
+    for path in sorted(service.SHOTS.glob("*.png")):
+        if path.read_bytes() == one_pixel:
+            path.unlink()
+            print(f"  swept {path.name}, left behind by a run that did not finish")
+
     made = []
     for name in ("01-home-billboard.png", "02-lyrics-screensaver.png"):
         path = service.SHOTS / name
