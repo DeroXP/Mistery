@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from ..theme import C
@@ -32,11 +32,29 @@ class _SectionBase(QWidget):
         self._title.setObjectName("SectionTitle")
         header.addWidget(self._title)
 
+        # How many, as a small pill after the title.
+        self._count = QLabel()
+        self._count.setObjectName("SectionCount")
+        self._count.setVisible(False)
+        header.addWidget(self._count, 0, Qt.AlignmentFlag.AlignVCenter)
+
         self._hint = QLabel(hint)
         self._hint.setObjectName("SectionHint")
         self._hint.setVisible(bool(hint))
         header.addWidget(self._hint)
         header.addStretch(1)
+
+        # A faint note on the right ("Hover one for a moment"), and a link
+        # ("See all"): both hidden until asked for.
+        self._aside = QLabel()
+        self._aside.setObjectName("SectionAside")
+        self._aside.setVisible(False)
+        header.addWidget(self._aside)
+        self.link = QPushButton()
+        self.link.setObjectName("SectionLink")
+        self.link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.link.setVisible(False)
+        header.addWidget(self.link)
         self._header = header
         self._layout.addLayout(header)
 
@@ -47,10 +65,36 @@ class _SectionBase(QWidget):
         self._hint.setText(text)
         self._hint.setVisible(bool(text))
 
+    def set_count(self, count: int | None) -> None:
+        self._count.setText(str(count) if count else "")
+        self._count.setVisible(bool(count))
+
+    def set_aside(self, text: str) -> None:
+        self._aside.setText(text)
+        self._aside.setVisible(bool(text))
+
+    def set_link(self, text: str) -> None:
+        self.link.setText(text)
+        self.link.setVisible(bool(text))
+
+    preview_host = None         # Home's hover preview, for the cards made from now on
+
+    def set_preview_host(self, host) -> None:
+        """Hand every card's hover to `host` (widgets/hover_preview.py), and
+        switch its dwell on: Home's rows and grids play in the host's card."""
+        self.preview_host = host
+        for card in self.findChildren(QWidget):
+            if hasattr(card, "preview_host"):
+                card.preview_host = host
+                card.set_preview_enabled(host is not None)
+
     def _wire(self, card) -> None:
         card.clicked.connect(self.item_clicked.emit)
         card.play_requested.connect(self.item_play_requested.emit)
         card.action_requested.connect(self.item_action.emit)
+        if self.preview_host is not None:
+            card.preview_host = self.preview_host
+            card.set_preview_enabled(True)
 
 
 class CardRow(_SectionBase):

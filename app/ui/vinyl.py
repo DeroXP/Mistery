@@ -126,9 +126,9 @@ def _ease_in_out(u: float) -> float:
 
 def readable_accent(colour: str) -> QColor:
     """The album's accent, lifted if it would vanish against black vinyl."""
-    accent = QColor(colour or "#E50914")
+    accent = QColor(colour or "#FFD23F")
     if not accent.isValid():
-        accent = QColor("#E50914")
+        accent = QColor("#FFD23F")
     hue, saturation, lightness, _ = accent.getHsl()
     if lightness < 110:
         accent.setHsl(max(0, hue), saturation, 110)
@@ -163,7 +163,7 @@ class VinylView(QWidget):
 
         self._path: str | None = None
         self._image = QImage()              # the cover, pre-shrunk once to label scale
-        self._accent = readable_accent("#E50914")
+        self._accent = readable_accent("#FFD23F")
         self._sheen = 1.0                   # the screensaver turns the fixed highlight down
         self._dim = 1.0                     # ...and the whole record, as the hours pass
 

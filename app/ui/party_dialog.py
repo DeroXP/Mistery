@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
@@ -45,9 +45,10 @@ from .. import db
 from ..config import settings
 from ..models import MediaItem
 from ..util import fmt_clock
-from .theme import C
+from .theme import C, display_family
 from .widgets.empty import WrapLabel
 from .widgets.flow import FlowLayout
+from .widgets.icons import paint_icon
 from .widgets.icons import IconButton
 
 _log = logging.getLogger("party.ui")
@@ -55,7 +56,9 @@ _log = logging.getLogger("party.ui")
 # "Works, but not for everyone": friends at your place can join and friends
 # elsewhere can't yet. Green would claim too much and red would alarm; the
 # theme has no amber of its own, and this is the only place that needs one.
-_AMBER = "#F2B84B"
+# Partial, blocked, not yet: a soft orange, clear of the yellow that means
+# "this one" everywhere else, and of the coral that means an error.
+_AMBER = "#FF9B54"
 
 # The dialogs' width. The invite code's longer line (41 characters at 14pt)
 # measures 497 px of the 552 inside its box; at 620 px wide with 15pt it
@@ -68,34 +71,9 @@ _WIDTH = 660
 def paint_people(painter: QPainter, rect: QRectF, color: QColor, stroke: float = 1.85) -> None:
     """Two people, the one in front a little larger: the movie night mark.
 
-    Authored in a 24x24 box like widgets/icons.py, and drawn here rather than
-    added to its table, because nothing but movie night uses it.
+    Drawn by widgets/icons.py, as "people": Home's Watch together uses it too.
     """
-    painter.save()
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    scale = min(rect.width(), rect.height()) / 24.0
-    painter.translate(rect.center().x() - 12 * scale, rect.center().y() - 12 * scale)
-    painter.scale(scale, scale)
-    pen = QPen(color, stroke)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    # The friend behind: a smaller head, and only the shoulder that shows.
-    painter.drawEllipse(QPointF(16.4, 7.9), 2.7, 2.7)
-    behind = QPainterPath()
-    behind.moveTo(15.2, 12.9)
-    behind.cubicTo(15.7, 12.7, 16.1, 12.6, 16.6, 12.6)
-    behind.cubicTo(19.2, 12.6, 21.2, 14.5, 21.2, 18.2)
-    painter.drawPath(behind)
-    # The one in front.
-    painter.drawEllipse(QPointF(9.0, 8.6), 3.4, 3.4)
-    front = QPainterPath()
-    front.moveTo(2.8, 20.0)
-    front.cubicTo(2.8, 15.6, 5.6, 13.6, 9.0, 13.6)
-    front.cubicTo(12.4, 13.6, 15.2, 15.6, 15.2, 20.0)
-    painter.drawPath(front)
-    painter.restore()
+    paint_icon(painter, "people", rect, color, stroke)
 
 
 class MovieNightButton(IconButton):
@@ -664,7 +642,7 @@ QDialog#MovieNight {{ background: {C.BG_ELEV}; }}
 #CodeBox, #StatusBox, #StepsBox, #NoteBox {{
     background: {C.BG};
     border: 1px solid {C.BORDER};
-    border-radius: 10px;
+    border-radius: 16px;
 }}
 #StepsBox {{ background: {C.SURFACE}; border-color: {C.BORDER_STRONG}; }}
 #Person {{
@@ -681,12 +659,14 @@ QPushButton#Disclosure {{
 }}
 QPushButton#Disclosure:hover {{ color: {C.TEXT}; }}
 QPushButton#Danger {{
-    background: transparent; border: 1px solid rgba(255, 90, 90, 0.55);
-    color: {C.DANGER}; font-weight: 600; padding: 9px 18px; border-radius: 6px;
+    background: transparent; border: 1px solid rgba(255, 107, 94, 0.55);
+    color: {C.DANGER}; font-weight: 600; padding: 9px 18px; border-radius: 17px;
 }}
-QPushButton#Danger:hover {{ background: rgba(255, 90, 90, 0.12); }}
-QPushButton#Primary {{ padding: 10px 24px; font-size: 10.5pt; }}
-QPushButton#Ghost {{ padding: 10px 20px; font-size: 10pt; }}
+QPushButton#Danger:hover {{ background: rgba(255, 107, 94, 0.12); }}
+/* Smaller than the window's buttons, so smaller corners too: past half the
+   height, Qt draws them square (the 22 of the window's own was, here). */
+QPushButton#Primary {{ padding: 10px 24px; min-height: 19px; font-size: 10.5pt; border-radius: 19px; }}
+QPushButton#Ghost {{ padding: 10px 20px; min-height: 18px; font-size: 10pt; border-radius: 18px; }}
 QLineEdit#CodeInput {{ padding: 11px 13px; {_MONO} font-size: 11pt; font-weight: 600; }}
 """
 
@@ -732,6 +712,8 @@ class _MovieNightDialog(QDialog):
         self.body.addWidget(self.eyebrow)
         self.body.addSpacing(6)
         self.headline = _text("", 16.5, C.TEXT, bold=True, rich=False)
+        self.headline.setStyleSheet(
+            f'color: {C.TEXT}; font-family: "{display_family()}"; font-size: 18pt; font-weight: 700;')
         self.body.addWidget(self.headline)
         self.subline = _text("", 10.0, C.TEXT_DIM, rich=False)
         self.body.addSpacing(4)

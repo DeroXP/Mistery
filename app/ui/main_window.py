@@ -1,4 +1,4 @@
-"""Application shell: top navigation, page stack and background wiring."""
+"""Application shell: the sidebar, the page stack and background wiring."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 import logging
+import random
 import threading
 import time
 
@@ -27,17 +28,21 @@ from .friend_library_view import FriendLibraryView, friend_item, friend_items
 from .friends_view import FriendsView
 from .home_view import HomeView
 from .library_view import LibraryView
+from .couch import CouchNav
+from .search_view import SearchView
+from .style import install as install_style
 from .music_view import MusicView
 from .playlists_view import PlaylistsView
 from .now_playing import NowPlayingBar, NowPlayingView
-from .party_dialog import (HostDialog, JoinDialog, MovieNightButton, ask_to_end,
-                           ask_to_end_friends_night)
+from .party_dialog import (HostDialog, JoinDialog, ask_to_end, ask_to_end_friends_night,
+                           paint_people)
 from .player_view import PlayerView
 from .settings_view import SettingsView
 from .show_view import ShowView
-from .theme import STYLESHEET, TOPBAR_H, C
+from .theme import RAIL_W, STYLESHEET, C, load_fonts
 from .tray import MisteryTray
-from .widgets.icons import IconButton
+from .widgets.sidebar import MovieNightItem, SideItem, Sidebar
+from .widgets.toast import StatusToast
 from .widgets.transition import HeroTransition
 
 _NAV = [
@@ -51,78 +56,11 @@ _NAV = [
     ("settings", "Settings"),
 ]
 _NAV_SEARCH = next(i for i, (name, _) in enumerate(_NAV) if name == "search")
+_NAV_MOVIES = next(i for i, (name, _) in enumerate(_NAV) if name == "film")
 _NAV_SETTINGS = next(i for i, (name, _) in enumerate(_NAV) if name == "settings")
 _NAV_MUSIC = next(i for i, (name, _) in enumerate(_NAV) if name == "music")
 _NAV_PLAYLISTS = next(i for i, (name, _) in enumerate(_NAV) if name == "queue")
 _NAV_FRIENDS = next(i for i, (name, _) in enumerate(_NAV) if name == "people")
-
-
-class NavButton(QPushButton):
-    """A text nav item in the top bar, underlined in red while it's the page."""
-
-    def __init__(self, icon_name: str, text: str, parent=None) -> None:
-        super().__init__(text, parent)
-        self.setObjectName("NavItem")
-        self.setCheckable(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._icon_name = icon_name
-
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        if not self.isChecked():
-            return
-        from PySide6.QtCore import QRectF
-        from PySide6.QtGui import QColor, QPainter
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(C.ACCENT))
-        painter.drawRoundedRect(
-            QRectF(12, self.height() - 4.0, self.width() - 24, 2.5), 1.2, 1.2
-        )
-
-
-class _StatusLine(QLabel):
-    """The top bar's line of library news, which gives way first.
-
-    At the window's 960 px minimum the bar needs 1016 px with the movie night
-    button in it (976 before it). A plain label kept its full width and the
-    squeeze landed on the wordmark instead (125 of its 139 px, measured) while
-    this line was cut off at its start. Now it shrinks to nothing if it must,
-    and ends in "…" rather than mid-letter; text() is still the whole line.
-    """
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._full = ""
-
-    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
-        self._full = text or ""
-        self._elide()
-
-    def text(self) -> str:
-        return self._full
-
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
-        return QSize(self.fontMetrics().horizontalAdvance(self._full) + 2, super().sizeHint().height())
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API
-        return QSize(0, super().minimumSizeHint().height())
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._elide()
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() == QEvent.Type.FontChange:
-            self._elide()
-
-    def _elide(self) -> None:
-        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, self.width())
-        super().setText(shown)
-        self.setToolTip(self._full if shown != self._full else "")
 
 
 class MainWindow(QMainWindow):
@@ -136,6 +74,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Mistery")
         self.resize(1440, 900)
         self.setMinimumSize(960, 620)
+        load_fonts()                    # before the style sheet names them
+        install_style()                 # the check box, drawn by hand (style.py)
         self.setStyleSheet(STYLESHEET)
 
         icon = icon_path()
@@ -152,18 +92,31 @@ class MainWindow(QMainWindow):
         self._host_dialog: HostDialog | None = None
         self._join_dialog: JoinDialog | None = None
 
+        # The pages to the right of a strip kept free for the sidebar, which
+        # floats over that strip and, while it is open, over the page's edge.
         root = QWidget()
         root.setObjectName("RootPane")
-        layout = QVBoxLayout(root)
+        frame = QHBoxLayout(root)
+        frame.setContentsMargins(0, 0, 0, 0)
+        frame.setSpacing(0)
+        self.setCentralWidget(root)
+        self._rail_space = QWidget()
+        self._rail_space.setFixedWidth(RAIL_W)
+        frame.addWidget(self._rail_space)
+        self._content = QWidget()
+        frame.addWidget(self._content, 1)
+        layout = QVBoxLayout(self._content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.setCentralWidget(root)
-
-        self.topbar = self._build_topbar()
-        layout.addWidget(self.topbar)
 
         self.stack = QStackedWidget()
         layout.addWidget(self.stack, 1)
+        self._status = StatusToast(self._content)
+        self.sidebar = self._build_sidebar(root)
+        # The name the top bar had: whatever hid it for the player hides this.
+        self.topbar = self.sidebar
+        root.installEventFilter(self)
+        self._content.installEventFilter(self)
 
         self.transition = HeroTransition(self)
         self.music = MusicPlayer(self)
@@ -181,7 +134,7 @@ class MainWindow(QMainWindow):
         self.home = HomeView()
         self.movies = LibraryView("movies")
         self.shows = LibraryView("shows")
-        self.search = LibraryView("search")
+        self.search = SearchView()
         self.detail = DetailView()
         self.show_page = ShowView()
         self.settings_page = SettingsView()
@@ -207,6 +160,9 @@ class MainWindow(QMainWindow):
 
         self._wire()
         self._install_shortcuts()
+        # A game controller: the glow, the hints, the player's buttons (couch.py).
+        self.couch = CouchNav(self)
+        self.settings_page.gamepad_changed.connect(self._on_gamepad_changed)
 
         self.stack.setCurrentWidget(self.home)
         # Last time's queue, paused on the song and the second it was left at.
@@ -296,49 +252,42 @@ class MainWindow(QMainWindow):
 
     # --- construction -------------------------------------------------------
 
-    def _build_topbar(self) -> QWidget:
-        panel = QWidget()
-        panel.setObjectName("TopBar")
-        panel.setFixedHeight(TOPBAR_H)
-        layout = QHBoxLayout(panel)
-        layout.setContentsMargins(36, 0, 28, 0)
-        layout.setSpacing(4)
-
-        brand = QLabel("MISTERY")
-        brand.setObjectName("Brand")
-        layout.addWidget(brand)
-        layout.addSpacing(22)
-
+    def _build_sidebar(self, root: QWidget) -> Sidebar:
+        sidebar = Sidebar(root)
+        # Its buttons keep _NAV's order as their ids (_on_nav picks the page by
+        # id), with Settings put at the foot, beside Movie night.
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
+        items: list[SideItem] = []
         for index, (icon_name, text) in enumerate(_NAV):
-            button = NavButton(icon_name, text)
-            button.setChecked(index == 0)
-            self._nav_group.addButton(button, index)
-            layout.addWidget(button)
+            glyph = paint_people if icon_name == "people" else None
+            item = SideItem(icon_name, text, sidebar, glyph)
+            item.setChecked(index == 0)
+            self._nav_group.addButton(item, index)
+            items.append(item)
+        for index, item in enumerate(items):
+            if index != _NAV_SETTINGS:
+                sidebar.add_item(item)
         self._nav_group.idClicked.connect(self._on_nav)
 
-        layout.addStretch(1)
-
-        self._status = _StatusLine()
-        self._status.setObjectName("NavStats")
-        self._status.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        layout.addWidget(self._status)
-        layout.addSpacing(14)
-
         # Join a friend's movie night from any page; while one is on, its panel.
-        self._party_button = MovieNightButton()
+        self._party_button = MovieNightItem(sidebar)
         self._party_button.clicked.connect(self.show_movie_night)
-        layout.addWidget(self._party_button)
-        layout.addSpacing(2)
+        sidebar.add_item(self._party_button, bottom=True)
+        sidebar.add_item(items[_NAV_SETTINGS], bottom=True)
 
-        self._rescan = IconButton("refresh", size=36, icon_size=19,
-                                  tooltip="Rescan the library  (Ctrl+R)")
+        self._rescan = sidebar.rescan
         self._rescan.clicked.connect(lambda: self.service.refresh(force=False))
-        layout.addWidget(self._rescan)
-        return panel
+        return sidebar
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        # The sidebar and the news card are laid over their panes by hand.
+        if event.type() == QEvent.Type.Resize:
+            if watched is self.centralWidget():
+                self.sidebar.place()
+            elif watched is getattr(self, "_content", None):
+                self._status.place()
+        return super().eventFilter(watched, event)
 
     def _wire(self) -> None:
         self.home.play_requested.connect(lambda item: self.play(item))
@@ -349,18 +298,35 @@ class MainWindow(QMainWindow):
         self.home.friend_play_requested.connect(self.play_friend)
         self.home.friend_open_requested.connect(self.open_friend_item)
         self.home.friend_together_requested.connect(self.watch_together)
+        # A preview's sound comes up only over silence, and only while the
+        # window is the one in front: never over music, never from behind.
+        self.home.preview_sound_allowed = lambda: not self.music.is_playing and self.isActiveWindow()
         self.home.add_folder_requested.connect(self._add_folder)
+        self.home.search_requested.connect(self._on_search_shortcut)
+        self.home.mood_see_all.connect(self._on_mood_see_all)
         self.home.movie_nights.join_requested.connect(self.join_movie_night)
         self.home.movie_nights.continue_requested.connect(self.continue_movie_night)
         self.home.movie_nights.forget_requested.connect(self._forget_movie_night)
         self.home.movie_nights.together_requested.connect(self.watch_together_again)
 
-        for view in (self.movies, self.shows, self.search):
+        self.movies.shuffle_requested.connect(self._shuffle_films)
+        for view in (self.movies, self.shows):
             view.play_requested.connect(lambda item: self.play(item))
             view.item_action.connect(self._on_card_action)
             view.open_media.connect(self.open_media)
             view.open_show.connect(self.open_show)
             view.add_folder_requested.connect(self._add_folder)
+        # Search finds everything: films, shows and episodes, music, and what
+        # friends share, and opens or plays each the way its own page would.
+        self.search.play_requested.connect(lambda item: self.play(item))
+        self.search.open_media.connect(self.open_media)
+        self.search.open_show.connect(self.open_show)
+        self.search.open_album.connect(self.open_album)
+        self.search.open_artist.connect(self.open_artist)
+        self.search.play_music.connect(
+            lambda songs, start, context: self.music.play_tracks(songs, start, in_order=True, context=context))
+        self.search.friend_open_requested.connect(self.open_friend_item)
+        self.search.friend_play_requested.connect(self.play_friend)
 
         # Not a bare play(): the rest of the playlist goes with it, so Up Next
         # and autoplay work for a list of films the way they do for a series.
@@ -463,6 +429,11 @@ class MainWindow(QMainWindow):
 
     def _install_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self._on_search_shortcut)
+        # "/" as well, as on the web. A text field keeps its own "/" (it claims
+        # the keys it types through ShortcutOverride), and the key is left to
+        # the film player and Now Playing while they fill the window
+        # (_update_chrome).
+        self._slash = QShortcut(QKeySequence("/"), self, activated=self._on_search_shortcut)
         QShortcut(QKeySequence("Ctrl+R"), self, activated=lambda: self.service.refresh())
         QShortcut(QKeySequence("Alt+Left"), self, activated=self._on_back_shortcut)
         # The music keys are shortcuts rather than keyPressEvent cases because a
@@ -533,6 +504,25 @@ class MainWindow(QMainWindow):
             self.player.request_close()
         else:
             self.go_back()
+
+    def _on_gamepad_changed(self, on: bool) -> None:
+        if not on:
+            self.couch.leave()
+        self.couch.pad.set_enabled(on)
+
+    def _shuffle_films(self, items) -> None:
+        """Movies' Shuffle: the films on screen in a random order, as a line-up,
+        so Up Next and autoplay carry on through them."""
+        films = [item for item in items if isinstance(item, MediaItem)]
+        if not films:
+            return
+        random.shuffle(films)
+        self.play(films[0], line_up=([film.id for film in films], 0))
+
+    def _on_mood_see_all(self, names) -> None:
+        """Home's time-of-day shelf, all of it: Movies, on those categories."""
+        self.movies.show_categories(names)
+        self._on_nav(_NAV_MOVIES)
 
     def _on_search_shortcut(self) -> None:
         # The top bar is hidden while a film plays, so Search isn't somewhere to
@@ -651,11 +641,15 @@ class MainWindow(QMainWindow):
         self._sync_nav(_NAV_FRIENDS)
 
     def open_friend_item(self, item) -> None:
-        """A friend's film or episode from Home: its page in their library, a
-        film's own or an episode's show."""
+        """Something of a friend's, from Home or Search: its page in their
+        library, a film's, show's or album's own, or an episode's show."""
         self.open_friend_library(item.friend_id)
         if item.kind == "movie":
             self.friend_library.open_film(item)
+        elif item.kind == "show":
+            self.friend_library.open_show(item)
+        elif item.kind == "album":
+            self.friend_library.open_album(item)
         elif item.kind == "episode" and item.parent_id is not None:
             show = friend_item(item.friend_id, "show", item.parent_id)
             if show is not None:
@@ -862,11 +856,16 @@ class MainWindow(QMainWindow):
         page = self.stack.currentWidget()
         # The film player and the full Now Playing view both take the window.
         immersive = page is self.player or page is self.now_playing
-        self.topbar.setVisible(not immersive)
+        self.sidebar.setVisible(not immersive)
+        self._rail_space.setVisible(not immersive)
+        if immersive:
+            self.sidebar.close_now()
         self.now_bar.setVisible(self.music.has_queue and not immersive)
+        self._status.set_bottom_gap(self.now_bar.sizeHint().height() if self.now_bar.isVisible() else 0)
         # The tray icon is there whenever there's music to control, and always
         # while it's the only way back into the app.
         self.tray.set_visible(self._in_tray or self.music.has_queue)
+        self._slash.setEnabled(not immersive)
         music_keys = self.music.has_queue and page is not self.player
         for shortcut in self._music_shortcuts:
             shortcut.setEnabled(music_keys)
@@ -941,6 +940,10 @@ class MainWindow(QMainWindow):
             self._external_watch.start()
             self._schedule_music_watch()
             self._art_retry.start()
+        # No window, no controller: its look for one every 2 s stops too.
+        couch = getattr(self, "couch", None)
+        if couch is not None:
+            couch.pad.set_enabled(not enabled and bool(settings.get("gamepad", True)))
 
     @property
     def in_tray(self) -> bool:
@@ -1547,9 +1550,10 @@ class MainWindow(QMainWindow):
         self.settings_page.add_folder()
 
     def _on_status(self, text: str) -> None:
-        # One line: this now sits in the top bar, not a tall sidebar panel.
+        """News for the card at the bottom right (widgets/toast.py); nothing
+        to tell puts the library in a line at the foot of the sidebar."""
         if text:
-            self._status.setText(text.replace("\n", " ")[:110])
+            self._status.show_message(text.replace("\n", " ")[:160])
             return
         stats = db.library_stats()
         bits = [
@@ -1560,7 +1564,9 @@ class MainWindow(QMainWindow):
         if stats.get("downloading"):
             count = stats["downloading"]
             bits.append(f"{count} still downloading")
-        self._status.setText("   ·   ".join(bits))
+        line = " · ".join(bits)
+        self.sidebar.set_stats(line)
+        self._status.set_idle(line)
 
     def _on_scan_finished(self, result) -> None:
         self._on_status(result.summary())
@@ -1618,28 +1624,6 @@ class MainWindow(QMainWindow):
         super().moveEvent(event)
         if self.stack.currentWidget() is self.player:
             self.player._sync_overlay()
-
-    # Below this width the page names close up (theme.py, #TopBar[compact]).
-    # With Friends among them the bar needs about 1040 px at their usual
-    # spacing, and under that the squeeze landed on the wordmark: 104 of its
-    # 139 px at the window's 960 px minimum.
-    _COMPACT_BELOW = 1060
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._fit_topbar()
-
-    def _fit_topbar(self) -> None:
-        bar = getattr(self, "topbar", None)
-        compact = self.width() < self._COMPACT_BELOW
-        if bar is None or bool(bar.property("compact")) == compact:
-            return
-        bar.setProperty("compact", compact)
-        for button in self._nav_group.buttons():
-            # A dynamic property only restyles what is polished again.
-            button.style().unpolish(button)
-            button.style().polish(button)
-        bar.updateGeometry()
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
@@ -1720,5 +1704,6 @@ class MainWindow(QMainWindow):
         if songs is not None:
             songs.close_all()
         self.player.shutdown()
+        self.home.hover_preview.shutdown()
         self.music.shutdown()
         self.service.shutdown()

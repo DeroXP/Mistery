@@ -119,16 +119,24 @@ Settings page shows what was found.
 ## Features
 
 **Interface**
-- Top navigation with the wordmark and a red underline on the current page —
-  the page itself starts immediately below it, so artwork gets the full width
-- A **billboard** on Home: the artwork bleeds off the right edge behind a
-  left-to-right scrim, with a white **Play** button and a grey **More info**
-- Tiles sit inset in their slot at rest and **grow into it under the pointer**,
-  with a drop shadow and a white play circle. Growing without a popup window or
-  reserved gaps is why the tile is inset rather than the slot oversized
-- Red is kept for the active page, watch progress and format badges. The
-  primary action is white — that restraint is what makes a dark page read as a
-  streaming app rather than a dark app with a coloured button
+- A **menu down the left**: icons at rest, their names when you rest the pointer
+  on it (it opens over the page rather than pushing it aside), the page you are
+  on filled yellow. Library totals and Rescan sit at its foot
+- **Home** greets you for the time of day ("Good evening", and how many things
+  are waiting where you left them), with a search pill; a rounded **hero** for
+  what to pick up, with how far along you are and *Resume · More info · Watch
+  together · Play in VR*; and a shelf for the hour ("Films for a quiet night",
+  "After dark") with *See all*
+- **Rest on a card on Home** and it grows and plays, from where you stopped:
+  silent for two seconds, then its sound fades in — never over music, and never
+  from a window that isn't in front. A title you haven't started shows its
+  picture instead (no spoilers from a minute picked at random)
+- Tiles **grow under the pointer** with a yellow edge and a play circle
+- A deep warm black, one accent (sunflower yellow) for what is chosen, playing
+  or to be pressed, titles in **Fraunces** and everything else in **Figtree**.
+  Both fonts are free (SIL Open Font License) and bundled in `assets/fonts`,
+  their licences beside them
+- A **game controller** works all of it from the couch (below)
 
 **Finding things in a big library**
 - **Categories** on Movies and Shows: tick as many as you like — Anime, Romance,
@@ -214,7 +222,8 @@ Settings page shows what was found.
   6 GB file with a zeroed header makes ffprobe report `EBML header parsing
   failed`; those are marked `incomplete` rather than `error`, kept out of the
   library listings, skipped by the artwork and thumbnail stages, and retried on
-  every scan until they become readable. The top bar shows how many are pending
+  every scan until they become readable. The foot of the menu on the left shows
+  how many are pending
 - **Derived data is invalidated when its source changes.** Artwork filenames and
   sprite indexes record the file size they were built from, so a file that grows
   (a download finishing) or is replaced (a better rip) never keeps stale art
@@ -300,7 +309,22 @@ consequences, both of which were live bugs:
 | `PgUp` / `PgDn` | previous/next chapter |
 | `,` `.` | frame step |
 | `Esc` | leave fullscreen, then leave the player |
-| `Ctrl+F` | search · `Ctrl+R` rescan · `Alt+←` back |
+| `/` or `Ctrl+F` | search · `Ctrl+R` rescan · `Alt+←` back |
+
+**Game controller** — Xbox (XInput) or PlayStation (DualShock 4, DualSense).
+Read only while Mistery's window is in front; Settings → *Game controller*
+switches it off, or makes everything bigger for across the room.
+
+| Xbox | PlayStation | |
+|---|---|---|
+| d-pad / left stick | d-pad / left stick | move the yellow glow |
+| `A` | `✕` | open / press |
+| `B` | `○` | back |
+| `X` | `□` | Watch together |
+| `Y` | `△` | Search |
+| `LB` `RB` | `L1` `R1` | the row above / below |
+| `Start` | `Options` | the menu on the left |
+| in the player: `A` · `LB` `RB` · `LT` `RT` · `Y` · `X` · `B` | `✕` · `L1` `R1` · `L2` `R2` · `△` · `□` · `○` | pause · ∓10 s · ∓30 s · subtitles · skip intro · close |
 
 **Mouse**
 
@@ -411,7 +435,7 @@ shows and music, streamed straight from one PC to the other. Their films and
 songs are never copied to your PC, there is no account, and no server sits in
 between.
 
-**Adding a friend.** Open **Friends** in the top bar. Either press **Get my
+**Adding a friend.** Open **Friends** in the menu on the left. Either press **Get my
 code** and send the code, or paste the code a friend sent under **Add theirs**.
 One code is enough, sent either way. It looks like a movie night invite with a
 2 in front, and pasting one in the wrong box is named rather than refused as a

@@ -22,6 +22,7 @@ from ..models import MediaItem
 from ..util import fmt_duration
 from .theme import C
 from .widgets.cards import WideCard, card_flow, set_extra_actions
+from .widgets.empty import EmptyState
 from .widgets.flow import FlowLayout
 from .widgets.icons import IconButton
 from .widgets.playlist_menu import (
@@ -146,13 +147,13 @@ class PlaylistsView(QWidget):
         area.setWidget(inner)
         self._index_stack.addWidget(area)
 
-        empty = QLabel(
-            "No playlists yet.\n\nRight-click any film or episode — on Home, in Movies, "
-            "in Shows or on a series page — and choose Add to playlist."
+        empty = EmptyState(
+            "queue", "No playlists yet",
+            "Right-click any film or episode — on Home, in Movies, in Shows or on a series "
+            "page — and choose Add to playlist.",
+            "New playlist",
         )
-        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.setWordWrap(True)
-        empty.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11pt;")
+        empty.action_clicked.connect(self._new_playlist)
         self._index_empty = empty
         self._index_stack.addWidget(empty)
         layout.addWidget(self._index_stack, 1)

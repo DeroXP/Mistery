@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QFont, QFontMetrics, QIcon
 from PySide6.QtWidgets import (
     QButtonGroup, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
@@ -12,12 +13,16 @@ from ..metadata import categories as cat
 from ..models import MediaItem, ShowItem
 from ..util import elide, fmt_duration
 from .detail_view import _Backdrop
-from .theme import C
+from .theme import C, display_family
 from .widgets.artview import ArtView
 from .widgets.cards import set_extra_actions
 from .widgets.chips import CategoryEditor
-from .widgets.icons import IconButton
+from .widgets.icons import IconButton, icon_pixmap
 from .widgets.rows import CardGrid
+from .widgets.segments import SegmentTray
+
+_TITLE_W = 760                  # the title's room before it steps down a size
+_TITLE_SIZES = (38, 32, 27)     # pt, largest first
 
 
 class ShowView(QWidget):
@@ -48,7 +53,9 @@ class ShowView(QWidget):
         content_layout.setSpacing(0)
         scroll.setWidget(content)
 
-        self._backdrop = _Backdrop(height=350)
+        # Room for the serif title, three lines of story and the 52-high buttons:
+        # at 350 the buttons were squeezed flat under the story.
+        self._backdrop = _Backdrop(height=410)
         header = QHBoxLayout(self._backdrop)
         header.setContentsMargins(52, 22, 52, 30)
         header.setSpacing(28)
@@ -59,7 +66,7 @@ class ShowView(QWidget):
         self._back.clicked.connect(self.back_requested.emit)
         left.addWidget(self._back, alignment=Qt.AlignmentFlag.AlignTop)
         left.addStretch(1)
-        self._poster = ArtView(170, 255, radius=12)
+        self._poster = ArtView(170, 255, radius=18)
         left.addWidget(self._poster)
         header.addLayout(left)
 
@@ -68,20 +75,20 @@ class ShowView(QWidget):
         info.setAlignment(Qt.AlignmentFlag.AlignBottom)
         header.addLayout(info, 1)
 
-        eyebrow = QLabel("SERIES")
-        eyebrow.setStyleSheet(
-            f"color: {C.ACCENT}; font-size: 9.5pt; font-weight: 700; letter-spacing: 1.2px;"
-        )
+        eyebrow = QLabel(
+            f'<span style="color: {C.ACCENT}; font-size: 9.5pt; font-weight: 700; letter-spacing: 1.4px;">'
+            "SHOW</span>")
+        eyebrow.setTextFormat(Qt.TextFormat.RichText)
         info.addWidget(eyebrow)
 
         self._title = QLabel()
         self._title.setWordWrap(True)
-        self._title.setStyleSheet(f"color: {C.TEXT}; font-size: 26pt; font-weight: 700;")
-        info.addSpacing(4)
+        self._title.setMaximumWidth(_TITLE_W)
+        info.addSpacing(6)
         info.addWidget(self._title)
 
         self._meta = QLabel()
-        self._meta.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10.5pt;")
+        self._meta.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11pt;")
         info.addSpacing(8)
         info.addWidget(self._meta)
 
@@ -96,7 +103,7 @@ class ShowView(QWidget):
         # The header is a fixed height, so the summary must not be allowed to
         # push the buttons out of it — three lines maximum.
         self._overview.setMaximumHeight(66)
-        self._overview.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10pt;")
+        self._overview.setStyleSheet("color: #E8E0D4; font-size: 10.5pt;")
         info.addSpacing(10)
         info.addWidget(self._overview)
 
@@ -104,8 +111,14 @@ class ShowView(QWidget):
         buttons.setSpacing(11)
         info.addSpacing(18)
         info.addLayout(buttons)
+        ratio = self.devicePixelRatioF()
         self._play = QPushButton("Play")
         self._play.setObjectName("Primary")
+        self._play.setIcon(QIcon(icon_pixmap("play", 20, C.PLAY_FG, ratio)))
+        self._play.setIconSize(QSize(20, 20))
+        self._play.setFixedHeight(52)
+        # Half the height at most: past half, Qt draws the corners square.
+        self._play.setStyleSheet("padding: 0 26px 0 20px; border-radius: 25px; font-size: 12.5pt;")
         self._play.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play.clicked.connect(self._play_next_up)
         buttons.addWidget(self._play)
@@ -114,6 +127,10 @@ class ShowView(QWidget):
         # has it too.
         self._party = QPushButton("Start movie night")
         self._party.setObjectName("Ghost")
+        self._party.setIcon(QIcon(icon_pixmap("people", 19, C.TEXT, ratio)))
+        self._party.setIconSize(QSize(19, 19))
+        self._party.setFixedHeight(52)
+        self._party.setStyleSheet("padding: 0 22px 0 18px; border-radius: 25px; font-size: 11.5pt;")
         self._party.setCursor(Qt.CursorShape.PointingHandCursor)
         self._party.setToolTip("Watch an episode with friends who have Mistery, in sync. Your "
                                "own place in the show stays where it is.")
@@ -129,12 +146,11 @@ class ShowView(QWidget):
         body_layout.setSpacing(18)
         content_layout.addWidget(body)
 
-        self._seasons_row = QHBoxLayout()
-        self._seasons_row.setSpacing(8)
+        self._seasons = SegmentTray(wrap=True)
         self._season_group = QButtonGroup(self)
         self._season_group.setExclusive(True)
         self._season_group.idToggled.connect(lambda _id, on: on and self._render_episodes())
-        body_layout.addLayout(self._seasons_row)
+        body_layout.addWidget(self._seasons, 0, Qt.AlignmentFlag.AlignLeft)
 
         self._grid = CardGrid(wide=True)
         self._grid.item_clicked.connect(self.open_media.emit)
@@ -159,6 +175,13 @@ class ShowView(QWidget):
 
         self._backdrop.set_art(show.backdrop or show.poster)
         self._poster.set_art(show.art, show.title)
+        # The biggest size the title fits on one line at, down to a floor.
+        size = _TITLE_SIZES[-1]
+        for size in _TITLE_SIZES:
+            if QFontMetrics(QFont(display_family(), size, QFont.Weight.Bold)).horizontalAdvance(show.title) <= _TITLE_W:
+                break
+        self._title.setStyleSheet(
+            f'color: {C.TEXT}; font-family: "{display_family()}"; font-size: {size}pt; font-weight: 700;')
         self._title.setText(show.title)
 
         self._episodes = [MediaItem.from_row(r) for r in db.episodes_for_show(show.id)]
@@ -173,7 +196,7 @@ class ShowView(QWidget):
         total = sum(e.duration or 0 for e in self._episodes)
         if total:
             meta_bits.append(fmt_duration(total) + " total")
-        self._meta.setText("   ·   ".join(meta_bits))
+        self._meta.setText("  ·  ".join(meta_bits))
 
         # Genres were plain text on this line; they are now the editor below it.
         self._categories.set_row(show.genres, fresh["user_genres"] if fresh else None)
@@ -183,27 +206,23 @@ class ShowView(QWidget):
 
         for button in list(self._season_group.buttons()):
             self._season_group.removeButton(button)
-            button.setParent(None)
-            button.deleteLater()
-        while self._seasons_row.count():
-            self._seasons_row.takeAt(0)
+        self._seasons.clear()
 
         if keep_season not in seasons:
             keep_season = seasons[0] if seasons else -1
         for season in seasons:
             chip = QPushButton(f"Season {season}")
-            chip.setObjectName("Chip")
             chip.setCheckable(True)
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
             chip.setChecked(season == keep_season)
             self._season_group.addButton(chip, season)
-            self._seasons_row.addWidget(chip)
-        self._seasons_row.addStretch(1)
+            self._seasons.add(chip)
+        self._seasons.setVisible(len(seasons) > 1)
 
         next_up = self._next_up()
         if next_up is not None:
             label = "Resume" if next_up.resume_position > 0 else "Play"
-            self._play.setText(f"{label}  {next_up.code}".strip())
+            self._play.setText(f"{label} · {next_up.code}" if next_up.code else label)
         self._play.setVisible(next_up is not None)
         self._party.setVisible(next_up is not None)
 

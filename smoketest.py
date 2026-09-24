@@ -536,7 +536,9 @@ def main() -> int:
                 db.execute("DELETE FROM progress WHERE media_id = ?", (episode_id,))
             db.set_watched(episode_ids[0], True)
             _touched.add(episode_ids[0])
-            rows = db.next_up()
+            # This show's row only: Next Up has a row for every show you've
+            # started, and a library in use has others.
+            rows = [row for row in db.next_up(limit=500) if int(row["show_id"]) == show_id]
             ok("Next Up resolves to the episode after the last watched",
                len(rows) == 1 and int(rows[0]["id"]) == episode_ids[1])
 
@@ -745,7 +747,8 @@ def main() -> int:
        window.stack.currentWidget() is window.search)
     window.search._search.setText("100%")
     pump(0.9)
-    ok("wildcard search is escaped", window.search._grid._flow.count() == 0)
+    ok("wildcard search is escaped", window.search.hits() == []
+       and window.search._pages.currentWidget() is window.search._nothing, window.search._count.text())
 
     print("\n-- vr --")
     targets = vr.detect(force=True)

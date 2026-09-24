@@ -188,6 +188,146 @@ def _settings(p: QPainter, c: QColor) -> None:
         p.restore()
 
 
+def _ticket(p: QPainter, c: QColor) -> None:
+    """A cinema ticket, notched at the sides, with its tear line: movie night."""
+    path = QPainterPath()
+    path.moveTo(3.4, 6.4)
+    path.lineTo(20.6, 6.4)
+    path.lineTo(20.6, 9.6)
+    path.arcTo(QRectF(18.2, 9.6, 4.8, 4.8), 90, 180)
+    path.lineTo(20.6, 17.6)
+    path.lineTo(3.4, 17.6)
+    path.lineTo(3.4, 14.4)
+    path.arcTo(QRectF(1.0, 9.6, 4.8, 4.8), -90, 180)
+    path.closeSubpath()
+    p.drawPath(path)
+    for y in (8.6, 11.0, 13.4, 15.8):
+        p.drawLine(QPointF(14.6, y), QPointF(14.6, y + 0.4))
+
+
+def _people(p: QPainter, c: QColor) -> None:
+    """Two people, the one in front a little larger: the movie night mark."""
+    # The friend behind: a smaller head, and only the shoulder that shows.
+    p.drawEllipse(QPointF(16.4, 7.9), 2.7, 2.7)
+    behind = QPainterPath()
+    behind.moveTo(15.2, 12.9)
+    behind.cubicTo(15.7, 12.7, 16.1, 12.6, 16.6, 12.6)
+    behind.cubicTo(19.2, 12.6, 21.2, 14.5, 21.2, 18.2)
+    p.drawPath(behind)
+    # The one in front.
+    p.drawEllipse(QPointF(9.0, 8.6), 3.4, 3.4)
+    front = QPainterPath()
+    front.moveTo(2.8, 20.0)
+    front.cubicTo(2.8, 15.6, 5.6, 13.6, 9.0, 13.6)
+    front.cubicTo(12.4, 13.6, 15.2, 15.6, 15.2, 20.0)
+    p.drawPath(front)
+
+
+def _vr(p: QPainter, c: QColor) -> None:
+    """A headset from the front: one visor, a notch for the nose."""
+    path = QPainterPath()
+    path.moveTo(5.0, 7.0)
+    path.lineTo(19.0, 7.0)
+    path.quadTo(21.4, 7.0, 21.4, 9.4)
+    path.lineTo(21.4, 14.8)
+    path.quadTo(21.4, 17.2, 19.0, 17.2)
+    path.lineTo(15.6, 17.2)
+    path.lineTo(13.9, 14.9)
+    path.quadTo(12.0, 12.9, 10.1, 14.9)
+    path.lineTo(8.4, 17.2)
+    path.lineTo(5.0, 17.2)
+    path.quadTo(2.6, 17.2, 2.6, 14.8)
+    path.lineTo(2.6, 9.4)
+    path.quadTo(2.6, 7.0, 5.0, 7.0)
+    path.closeSubpath()
+    p.drawPath(path)
+
+
+def _mug(p: QPainter, c: QColor) -> None:
+    """A cup with steam rising: cozy."""
+    body = QPainterPath()
+    body.moveTo(4.6, 10.0)
+    body.lineTo(15.4, 10.0)
+    body.lineTo(15.4, 16.0)
+    body.quadTo(15.4, 20.0, 11.4, 20.0)
+    body.lineTo(8.6, 20.0)
+    body.quadTo(4.6, 20.0, 4.6, 16.0)
+    body.closeSubpath()
+    p.drawPath(body)
+    p.drawArc(QRectF(13.6, 11.2, 5.6, 5.6), int(-90 * 16), int(180 * 16))
+    for x in (8.2, 11.8):
+        steam = QPainterPath()
+        steam.moveTo(x, 7.6)
+        steam.cubicTo(x - 1.3, 6.4, x + 1.3, 5.2, x, 3.6)
+        p.drawPath(steam)
+
+
+def _rain(p: QPainter, c: QColor) -> None:
+    """A cloud, and rain from it."""
+    cloud = QPainterPath()
+    cloud.moveTo(7.0, 15.0)
+    cloud.cubicTo(4.2, 15.0, 3.0, 13.0, 3.4, 11.2)
+    cloud.cubicTo(3.8, 9.4, 5.6, 8.6, 7.2, 9.0)
+    cloud.cubicTo(8.0, 6.0, 11.0, 4.6, 13.8, 5.4)
+    cloud.cubicTo(16.2, 6.1, 17.6, 8.2, 17.4, 10.2)
+    cloud.cubicTo(19.6, 10.2, 21.0, 11.8, 20.8, 13.2)
+    cloud.cubicTo(20.6, 14.4, 19.6, 15.0, 18.4, 15.0)
+    cloud.closeSubpath()
+    p.drawPath(cloud)
+    for x in (8.4, 12.4, 16.4):
+        p.drawLine(QPointF(x, 17.8), QPointF(x - 1.0, 20.4))
+
+
+def _clock(p: QPainter, c: QColor) -> None:
+    """A stopwatch: not much time, or a while ago."""
+    p.drawEllipse(QRectF(4.0, 5.4, 15.6, 15.6))
+    p.drawLine(QPointF(11.8, 9.4), QPointF(11.8, 13.2))
+    p.drawLine(QPointF(11.8, 13.2), QPointF(14.2, 14.8))
+    p.drawLine(QPointF(9.8, 2.6), QPointF(13.8, 2.6))
+    p.drawLine(QPointF(11.8, 2.6), QPointF(11.8, 5.4))
+
+
+def _smile(p: QPainter, c: QColor) -> None:
+    """A smiling face: feel-good."""
+    p.drawEllipse(QRectF(3.4, 3.4, 17.2, 17.2))
+    p.drawArc(QRectF(7.6, 8.0, 8.8, 8.4), int(200 * 16), int(140 * 16))
+    p.save()
+    p.setBrush(QBrush(c))
+    p.drawEllipse(QPointF(9.3, 9.9), 0.55, 0.55)
+    p.drawEllipse(QPointF(14.7, 9.9), 0.55, 0.55)
+    p.restore()
+
+
+def _resume(p: QPainter, c: QColor) -> None:
+    """Round and back to where you were: what you stopped part way."""
+    p.drawArc(QRectF(4.0, 4.0, 16.0, 16.0), int(180 * 16), int(270 * 16))
+    p.drawPolyline(QPolygonF([QPointF(4.0, 4.0), QPointF(4.0, 9.0), QPointF(9.0, 9.0)]))
+
+
+def _gamepad(p: QPainter, c: QColor) -> None:
+    """A game controller: its body, a d-pad on the left, two buttons on the right."""
+    body = QPainterPath()
+    body.moveTo(7.0, 8.0)
+    body.lineTo(17.0, 8.0)
+    body.quadTo(21.0, 8.0, 21.0, 12.0)
+    body.lineTo(21.6, 16.2)
+    body.quadTo(21.8, 18.4, 19.6, 18.6)
+    body.quadTo(18.2, 18.7, 17.5, 18.0)
+    body.lineTo(15.0, 15.0)
+    body.lineTo(9.0, 15.0)
+    body.lineTo(6.5, 18.0)
+    body.quadTo(5.8, 18.7, 4.4, 18.6)
+    body.quadTo(2.2, 18.4, 2.4, 16.2)
+    body.lineTo(3.0, 12.0)
+    body.quadTo(3.0, 8.0, 7.0, 8.0)
+    body.closeSubpath()
+    p.drawPath(body)
+    p.drawLine(QPointF(7.0, 10.9), QPointF(7.0, 14.1))
+    p.drawLine(QPointF(5.4, 12.5), QPointF(8.6, 12.5))
+    for x, y in ((15.6, 11.8), (17.6, 13.6)):
+        p.drawLine(QPointF(x, y), QPointF(x + 0.01, y))
+
+
 def _refresh(p: QPainter, c: QColor) -> None:
     p.drawArc(QRectF(4.2, 4.2, 15.6, 15.6), int(60 * 16), int(280 * 16))
     _tri(p, [(17.6, 2.4), (20.8, 6.6), (15.4, 7.4)], c)
@@ -401,7 +541,7 @@ DRAWERS: dict[str, Callable[[QPainter, QColor], None]] = {
     "mute": _mute, "fullscreen": _fullscreen, "exit_fullscreen": _exit_fullscreen,
     "close": _close, "chevron_left": _chevron_left, "chevron_right": _chevron_right,
     "chevron_down": _chevron_down, "back": _back, "home": _home, "film": _film,
-    "tv": _tv, "search": _search, "settings": _settings, "refresh": _refresh,
+    "tv": _tv, "search": _search, "settings": _settings, "refresh": _refresh, "ticket": _ticket,
     "cc": _cc, "audio": _audio, "boost": _boost, "chapters": _chapters,
     "autoplay": _autoplay, "quality": _quality, "music": _music,
     "shuffle": _shuffle, "repeat": _repeat, "repeat_one": _repeat_one,
@@ -410,7 +550,9 @@ DRAWERS: dict[str, Callable[[QPainter, QColor], None]] = {
     "plus": _plus, "trash": _trash, "speed": _speed,
     "sound": _sound, "spatial": _spatial,
     "heart": _heart, "heart_filled": _heart_filled, "moon": _moon, "disc": _disc,
-    "device": _device,
+    "device": _device, "people": _people, "vr": _vr,
+    "mug": _mug, "rain": _rain, "clock": _clock, "smile": _smile, "resume": _resume,
+    "gamepad": _gamepad,
 }
 
 

@@ -1,6 +1,9 @@
-"""Home: hero banner, Continue Watching, Movie nights, then the library as a grid."""
+"""Home: a greeting, the hero, Continue Watching, Next Up, a shelf for the time
+of day, Movie nights, then the library as a grid."""
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
@@ -10,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from .. import db
 from ..config import settings
+from ..metadata import categories as cat
 from ..models import MediaItem, ShowItem
 from ..util import fmt_clock, progress_fraction
 from .friend_library_view import FriendItem, friend_continue_items, friend_night_item
@@ -18,11 +22,43 @@ from .theme import C
 from .widgets.artview import ArtView
 from .widgets.flow import FlowLayout
 from .widgets.hero import HeroBanner
+from .widgets.home_header import HomeHeader
+from .widgets.hover_preview import HoverPreview
 from .widgets.rows import CardGrid, CardRow
 
 # How many movie nights Home lists: the most recent, one card each.
 _MOVIE_NIGHTS = 8
 _CARD_W = 540
+
+# The shelf after Next Up, for the time of day: (from hour, to hour, its title,
+# the categories it draws on). Hours past midnight count on from 24.
+_MOODS = (
+    (5, 12, "Something easy for the morning", ("Comedy", "Animation", "Family", "Music", "Kids")),
+    (12, 17, "An afternoon adventure", ("Adventure", "Action", "Fantasy", "Superhero", "Western")),
+    (17, 22, "Films for a quiet night", ("Drama", "Romance", "Mystery", "Animation", "History", "Documentary")),
+    (22, 29, "After dark", ("Thriller", "Horror", "Mystery", "Crime", "Science Fiction", "Supernatural")),
+)
+_MOOD_MIN = 3           # fewer films than this, and the shelf stays away
+_MOOD_MAX = 14
+
+
+def mood_for(hour: int) -> tuple[str, tuple[str, ...]]:
+    """The shelf's title and categories at this hour."""
+    hour = hour + 24 if hour < 5 else hour
+    for start, end, title, names in _MOODS:
+        if start <= hour < end:
+            return title, names
+    return _MOODS[2][2], _MOODS[2][3]
+
+
+def mood_films(rows, names) -> list[MediaItem]:
+    """Films not yet watched, in any of `names`, the best rated first. From the
+    database rows, whose hand-set categories (user_genres) count too."""
+    wanted = set(names)
+    films = [MediaItem.from_row(row) for row in rows if wanted & set(cat.categories_of(row))]
+    films = [film for film in films if not film.watched]
+    films.sort(key=lambda film: (-(film.rating or 0.0), -(film.added_at or 0.0)))
+    return films[:_MOOD_MAX]
 
 
 class _PartyArt(ArtView):
@@ -272,6 +308,8 @@ class HomeView(QWidget):
     friend_play_requested = Signal(object)
     friend_open_requested = Signal(object)
     friend_together_requested = Signal(object)      # its menu's Watch together (app/share/nights.py)
+    search_requested = Signal()                     # the search pill in the greeting
+    mood_see_all = Signal(list)                     # the time-of-day shelf's See all: its categories
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -291,17 +329,22 @@ class HomeView(QWidget):
         self._content.setSpacing(0)
         self._scroll.setWidget(content)
 
+        body = QWidget()
+        self._body = QVBoxLayout(body)
+        self._body.setContentsMargins(52, 28, 52, 48)
+        self._body.setSpacing(34)
+        self._content.addWidget(body)
+
+        self.header = HomeHeader()
+        self.header.search_requested.connect(self.search_requested.emit)
+        self._body.addWidget(self.header)
+
         self.hero = HeroBanner()
         self.hero.play_requested.connect(self.play_requested.emit)
         self.hero.play_in_vr_requested.connect(self.play_in_vr_requested.emit)
         self.hero.details_requested.connect(self.open_media.emit)
-        self._content.addWidget(self.hero)
-
-        body = QWidget()
-        self._body = QVBoxLayout(body)
-        self._body.setContentsMargins(52, 8, 52, 48)
-        self._body.setSpacing(38)
-        self._content.addWidget(body)
+        self.hero.together_requested.connect(lambda item: self.item_action.emit("party", item))
+        self._body.addWidget(self.hero)
 
         # Only this row previews: these are files you have already started, so
         # the seek sprite exists and the resume point is the frame worth showing.
@@ -312,6 +355,13 @@ class HomeView(QWidget):
         self.next_up_row = CardRow("Next Up", wide=True)
         self._connect(self.next_up_row)
         self._body.addWidget(self.next_up_row)
+
+        self.mood_row = CardRow("", wide=False)
+        self._connect(self.mood_row)
+        self.mood_row.set_link("See all")
+        self.mood_row.link.clicked.connect(lambda: self.mood_see_all.emit(list(self._mood_names)))
+        self._mood_names: tuple[str, ...] = ()
+        self._body.addWidget(self.mood_row)
 
         # MainWindow connects its signals: Join, Continue and Remove.
         self.movie_nights = MovieNights()
@@ -328,6 +378,20 @@ class HomeView(QWidget):
         self._empty = self._build_empty_state()
         self._body.addWidget(self._empty)
         self._body.addStretch(1)
+
+        # Rest on any card here and it grows and plays (widgets/hover_preview.py).
+        # MainWindow says when its sound may come up: not over music.
+        self.preview_sound_allowed = lambda: True
+        self.hover_preview = HoverPreview(self, sound_allowed=lambda: self.preview_sound_allowed())
+        self.hover_preview.play_requested.connect(self._on_play)
+        self.hover_preview.open_requested.connect(self._on_item_clicked)
+        for section in (self.continue_row, self.next_up_row, self.mood_row, self.movies_grid, self.shows_grid):
+            section.set_preview_host(self.hover_preview)
+        self._scroll.verticalScrollBar().valueChanged.connect(lambda _: self.hover_preview.close_preview())
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self.hover_preview.close_preview()
+        super().hideEvent(event)
 
     def _connect(self, section) -> None:
         section.item_clicked.connect(self._on_item_clicked)
@@ -385,7 +449,9 @@ class HomeView(QWidget):
     # --- refresh ------------------------------------------------------------
 
     def reload(self) -> None:
-        movies = [MediaItem.from_row(r) for r in db.movies()]
+        self.hover_preview.close_preview()          # its card is about to be rebuilt
+        movie_rows = db.movies()
+        movies = [MediaItem.from_row(r) for r in movie_rows]
         shows = [ShowItem.from_row(r) for r in db.all_shows()]
         # Yours and your friends' in one row, by when you last watched each:
         # a friend's film you stopped halfway is resumed from here like yours.
@@ -396,21 +462,29 @@ class HomeView(QWidget):
         started.sort(key=lambda pair: pair[0], reverse=True)
         resume = [item for _when, item in started[:16]]
 
+        self.header.set_waiting(len(resume))
         self.hero.set_item(MediaItem.from_row(db.hero_candidate()))
         self.continue_row.set_items(resume)
-        self.continue_row.set_hint(f"{len(resume)} in progress" if resume else "")
+        self.continue_row.set_count(len(resume))
+        self.continue_row.set_aside("Hover one for a moment" if resume else "")
 
         next_up = [MediaItem.from_row(r) for r in db.next_up()]
         self.next_up_row.set_items(next_up)
+
+        title, names = mood_for(datetime.now().hour)
+        shelf = mood_films(movie_rows, names)
+        self._mood_names = names
+        self.mood_row.set_title(title)
+        self.mood_row.set_items(shelf if len(shelf) >= _MOOD_MIN else [])
         self.movie_nights.reload()
 
         self.movies_grid.set_items(movies)
         self.movies_grid.setVisible(bool(movies))
-        self.movies_grid.set_hint(f"{len(movies)}" if movies else "")
+        self.movies_grid.set_count(len(movies))
 
         self.shows_grid.set_items(shows)
         self.shows_grid.setVisible(bool(shows))
-        self.shows_grid.set_hint(f"{len(shows)}" if shows else "")
+        self.shows_grid.set_count(len(shows))
 
         empty = not movies and not shows
         self._empty.setVisible(empty)
@@ -420,7 +494,7 @@ class HomeView(QWidget):
                 self._empty_detail.setText(
                     "Watching:\n" + "\n".join(folders)
                     + "\n\nNothing playable turned up in there. Add another folder, "
-                      "or use Rescan in the top bar once you've copied files in."
+                      "or use Rescan at the foot of the sidebar once you've copied files in."
                 )
             else:
                 self._empty_detail.setText(

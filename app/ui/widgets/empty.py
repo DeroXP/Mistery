@@ -8,7 +8,7 @@ from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QTextDocument
 from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
-from ..theme import C
+from ..theme import C, display_family
 from .icons import paint_icon
 
 COLUMN_WIDTH = 560
@@ -66,8 +66,8 @@ class _Glyph(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect())
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 12))
-        painter.drawRoundedRect(rect, 16, 16)
+        painter.setBrush(QColor(246, 240, 230, 14))
+        painter.drawRoundedRect(rect, 22, 22)
         paint_icon(painter, self._name, rect.adjusted(17, 17, -17, -17),
                    QColor(C.TEXT_FAINT), stroke=1.7)
 
@@ -106,7 +106,7 @@ class EmptyState(QWidget):
         self._headline = QLabel(headline)
         self._headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._headline.setStyleSheet(
-            f"color: {C.TEXT}; font-size: 16pt; font-weight: 600;"
+            f'color: {C.TEXT}; font-family: "{display_family()}"; font-size: 19pt; font-weight: 700;'
         )
         layout.addWidget(self._headline)
         layout.addSpacing(12)

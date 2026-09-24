@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
     QSpinBox, QVBoxLayout, QWidget,
 )
@@ -24,6 +24,7 @@ from ..music import audio_fx, library as music_library, loudness
 from ..player.mpv_process import quality_preset
 from ..util import fmt_duration, fmt_size, reveal_in_explorer
 from .theme import C
+from .widgets.segments import SegmentTray
 
 
 def _saver_after() -> int:
@@ -99,6 +100,7 @@ class SettingsView(QWidget):
     discord_changed = Signal()
     sound_changed = Signal()
     music_cover_changed = Signal()          # the Now Playing cover style
+    gamepad_changed = Signal(bool)          # a game controller on or off (ui/couch.py)
     # Answers from work done on a thread of its own (the TMDB key check, the
     # Discord art export), carried back to the UI thread.
     _tmdb_checked = Signal(bool, str)
@@ -114,6 +116,23 @@ class SettingsView(QWidget):
         self._update_switched.connect(self._on_update_switched)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # The title and a menu of the sections stay put; the sections scroll
+        # under them. The menu follows the scrolling (_follow_scroll).
+        top = QWidget()
+        top_layout = QVBoxLayout(top)
+        top_layout.setContentsMargins(52, 30, 52, 14)
+        top_layout.setSpacing(14)
+        heading = QLabel("Settings")
+        heading.setObjectName("PageTitle")
+        top_layout.addWidget(heading)
+        self._section_tray = SegmentTray(wrap=True)
+        self._section_group = QButtonGroup(self)
+        self._section_group.setExclusive(True)
+        self._section_group.idClicked.connect(self._go_to_section)
+        top_layout.addWidget(self._section_tray, 0, Qt.AlignmentFlag.AlignLeft)
+        root.addWidget(top)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -124,26 +143,59 @@ class SettingsView(QWidget):
 
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(52, 34, 52, 52)
+        layout.setContentsMargins(52, 8, 52, 52)
         layout.setSpacing(22)
         scroll.setWidget(page)
 
-        heading = QLabel("Settings")
-        heading.setObjectName("PageTitle")
-        layout.addWidget(heading)
-
-        layout.addWidget(self._build_folders())
-        layout.addWidget(self._build_tmdb())
-        layout.addWidget(self._build_playback())
-        layout.addWidget(self._build_music())
-        layout.addWidget(self._build_sound())
-        layout.addWidget(self._build_thumbnails())
-        layout.addWidget(self._build_discord())
+        # Built in the order they always were, then listed for the menu.
+        folders = self._build_folders()
+        tmdb = self._build_tmdb()
+        playback = self._build_playback()
+        music = self._build_music()
+        sound = self._build_sound()
+        thumbnails = self._build_thumbnails()
+        discord = self._build_discord()
         self._movie_night = self._build_movie_night()
-        layout.addWidget(self._movie_night)
-        layout.addWidget(self._build_vr())
-        layout.addWidget(self._build_about())
+        vr_card = self._build_vr()
+        controller = self._build_controller()
+        about = self._build_about()
+        self._sections: list[tuple[str, QWidget]] = [
+            ("Library", folders), ("Artwork", tmdb), ("Playback", playback), ("Music", music),
+            ("Sound", sound), ("Thumbnails", thumbnails), ("Discord", discord),
+            ("Movie night", self._movie_night), ("VR", vr_card), ("Controller", controller),
+            ("System", about),
+        ]
+        for index, (name, card) in enumerate(self._sections):
+            layout.addWidget(card)
+            chip = QPushButton(name)
+            chip.setCheckable(True)
+            chip.setChecked(index == 0)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._section_group.addButton(chip, index)
+            self._section_tray.add(chip)
         layout.addStretch(1)
+        scroll.verticalScrollBar().valueChanged.connect(self._follow_scroll)
+
+    # --- the section menu -----------------------------------------------------
+
+    def _go_to_section(self, index: int) -> None:
+        card = self._sections[index][1]
+        bar = self._scroll.verticalScrollBar()
+        bar.setValue(max(0, min(bar.maximum(), card.y() - 8)))
+        self._section_group.button(index).setChecked(True)
+
+    def _follow_scroll(self, value: int) -> None:
+        """Light the section at the top of the view as the page scrolls."""
+        bar = self._scroll.verticalScrollBar()
+        current = 0
+        for index, (_name, card) in enumerate(self._sections):
+            if card.y() - 40 <= value:
+                current = index
+        if value >= bar.maximum() and bar.maximum() > 0:
+            current = len(self._sections) - 1       # the last ones cannot reach the top
+        button = self._section_group.button(current)
+        if button is not None and not button.isChecked():
+            button.setChecked(True)
 
     # --- library folders ----------------------------------------------------
 
@@ -1101,6 +1153,44 @@ class SettingsView(QWidget):
         self._scroll.verticalScrollBar().setValue(max(0, self._movie_night.y() - 20))
 
     # --- vr -----------------------------------------------------------------
+
+    def _build_controller(self) -> QWidget:
+        card, layout = _section(
+            "Game controller",
+            "An Xbox or PlayStation controller works Mistery from the couch: a yellow glow on "
+            "whatever it is on, and what its buttons do along the bottom. It is only read while "
+            "Mistery's window is in front, so a game in another window keeps it to itself.",
+        )
+        self._gamepad_on = QCheckBox("Use a game controller")
+        self._gamepad_on.setChecked(bool(settings.get("gamepad", True)))
+        self._gamepad_on.toggled.connect(self._on_gamepad_toggled)
+        layout.addWidget(self._gamepad_on)
+        self._gamepad_bigger = QCheckBox("Bigger text and buttons, for across the room (after a restart)")
+        self._gamepad_bigger.setChecked(bool(settings.get("couch_bigger", False)))
+        self._gamepad_bigger.toggled.connect(lambda on: settings.set("couch_bigger", bool(on)))
+        layout.addWidget(self._gamepad_bigger)
+        self._gamepad_state = QLabel("No controller connected.")
+        self._gamepad_state.setObjectName("Faint")
+        layout.addWidget(self._gamepad_state)
+        legend = QLabel(
+            "<b>A</b> or <b>✕</b> opens · <b>B</b> or <b>○</b> goes back · <b>X</b> or <b>□</b> Watch together · "
+            "<b>Y</b> or <b>△</b> Search · <b>LB RB</b> or <b>L1 R1</b> the rows · <b>Start</b> or "
+            "<b>Options</b> the menu<br>In the player: <b>A</b> pause · <b>LB RB</b> back and on "
+            f"{int(settings.get('seek_step', 10))} s · <b>LT RT</b> further · <b>Y</b> subtitles · "
+            "<b>X</b> skip the intro · up and down, the volume · <b>B</b> close")
+        legend.setTextFormat(Qt.TextFormat.RichText)
+        legend.setWordWrap(True)
+        legend.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 9.5pt;")
+        layout.addWidget(legend)
+        return card
+
+    def _on_gamepad_toggled(self, on: bool) -> None:
+        settings.set("gamepad", bool(on))
+        self.gamepad_changed.emit(bool(on))
+
+    def set_gamepad_state(self, words: str) -> None:
+        """What is connected, from the window (couch.py)."""
+        self._gamepad_state.setText(words)
 
     def _build_vr(self) -> QWidget:
         card, layout = _section(

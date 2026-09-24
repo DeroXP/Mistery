@@ -63,9 +63,13 @@ class _BaseCard(QWidget):
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._animation.valueChanged.connect(self._on_hover_value)
 
-        # Hover preview, off unless a row asks for it.
+        # Hover preview, off unless a row asks for it. With a host (Home's
+        # widgets/hover_preview.HoverPreview) the card hands itself over after
+        # the dwell, and the host plays the film; without one it plays the
+        # seek-bar sprite in place, as a flipbook.
         self._hovered = False
         self._preview_enabled = False
+        self.preview_host = None
         self._preview_index: dict | None = None
         self._preview_sheet = QImage()
         self._preview_frame = 0
@@ -92,9 +96,13 @@ class _BaseCard(QWidget):
     def _begin_preview(self) -> None:
         """Dwell elapsed: load the sprite this file already has, then animate it."""
         item = self._item
-        source = getattr(item, "thumbs", None)
         # _hovered rather than underMouse(): the latter goes stale while rows
         # are rebuilt underneath the pointer, and enter/leave already know.
+        if self.preview_host is not None:
+            if self._preview_enabled and self._hovered:
+                self.preview_host.rest_on(self)
+            return
+        source = getattr(item, "thumbs", None)
         if not self._preview_enabled or not source or not self._hovered:
             return
         if self._preview_index is None:
@@ -198,18 +206,32 @@ class _BaseCard(QWidget):
         self._animation.setEndValue(target)
         self._animation.start()
 
+    def set_lit(self, lit: bool) -> None:
+        """The pointer arriving (or leaving), or a game controller's glow doing
+        the same (ui/couch.py): the tile comes forward and, on Home, a moment
+        later its preview opens."""
+        self._hovered = lit
+        self._animate_to(1.0 if lit else 0.0)
+        if lit:
+            if self._preview_enabled:
+                self._preview_dwell.start()
+        else:
+            self._stop_preview()
+            if self.preview_host is not None:
+                self.preview_host.card_left(self)
+
     def enterEvent(self, event) -> None:
-        self._hovered = True
-        self._animate_to(1.0)
-        if self._preview_enabled:
-            self._preview_dwell.start()
+        self.set_lit(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self._animate_to(0.0)
-        self._stop_preview()
+        self.set_lit(False)
         super().leaveEvent(event)
+
+    def art_rect_in(self, widget: QWidget) -> QRect:
+        """The artwork at its full hovered size, in `widget`'s coordinates:
+        where Home's hover preview grows from."""
+        return QRect(self.mapTo(widget, QPoint(0, 0)), QSize(self.ART_W, self.ART_H))
 
     def _play_button_rect(self) -> QRectF:
         art = self._art_rect()
@@ -311,9 +333,14 @@ class _BaseCard(QWidget):
         if self._hover > 0.01:
             painter.fillPath(path, QColor(0, 0, 0, int(72 * self._hover)))
 
+        # A faint edge at rest, warming to the yellow ring under the pointer.
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        border = QColor(255, 255, 255, int(26 + 130 * self._hover))
-        painter.setPen(QPen(border, 1.2))
+        rest, lit = QColor(255, 255, 255, 26), QColor(C.ACCENT)
+        border = QColor(round(rest.red() + (lit.red() - rest.red()) * self._hover),
+                        round(rest.green() + (lit.green() - rest.green()) * self._hover),
+                        round(rest.blue() + (lit.blue() - rest.blue()) * self._hover),
+                        round(rest.alpha() + (lit.alpha() - rest.alpha()) * self._hover))
+        painter.setPen(QPen(border, 1.2 + 1.3 * self._hover))
         painter.drawPath(path)
 
     def _paint_play_button(self, painter: QPainter) -> None:
@@ -346,7 +373,7 @@ class _BaseCard(QWidget):
         painter.save()
         painter.setClipPath(clip)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(90, 90, 90, 220))
+        painter.setBrush(QColor(246, 240, 230, 60))
         painter.drawRect(track)
         painter.setBrush(QColor(C.ACCENT))
         painter.drawRect(QRectF(track.left(), track.top(),
@@ -357,10 +384,10 @@ class _BaseCard(QWidget):
         size = 24.0
         badge = QRectF(rect.right() - size - 8, rect.top() + 8, size, size)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 190))
+        painter.setBrush(QColor(C.ACCENT))
         painter.drawEllipse(badge)
         inner = badge.adjusted(5, 5, -5, -5)
-        paint_icon(painter, "check", inner, QColor(C.TEXT), stroke=2.4)
+        paint_icon(painter, "check", inner, QColor(C.ON_ACCENT), stroke=2.4)
 
     def _paint_text(self, painter: QPainter, top: float, title: str, subtitle: str) -> None:
         left = _REST_INSET

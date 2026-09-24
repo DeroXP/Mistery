@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QImage, QLinearGradient, QPainter
 from PySide6.QtWidgets import (
     QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy,
     QVBoxLayout, QWidget,
@@ -15,12 +15,16 @@ from .. import db, vr
 from ..images import load_async
 from ..metadata import categories as cat
 from ..models import MediaItem
-from ..util import elide, fmt_clock, fmt_duration, fmt_size, reveal_in_explorer
-from .theme import C
+from ..util import elide, fmt_clock, fmt_duration, fmt_remaining, fmt_size, reveal_in_explorer
+from .theme import C, display_family
 from .widgets.artview import ArtView
 from .widgets.chips import CategoryEditor
 from .widgets.flow import FlowLayout
-from .widgets.icons import IconButton
+from .widgets.hero import ProgressBar
+from .widgets.icons import IconButton, icon_pixmap
+
+_TITLE_W = 760                  # the title's room before it steps down a size
+_TITLE_SIZES = (38, 32, 27)     # pt, largest first
 
 
 class _Backdrop(QWidget):
@@ -71,15 +75,17 @@ class _Backdrop(QWidget):
             )
             painter.setOpacity(1.0)
 
+        base = QColor(C.BG)
+        red, green, blue = base.red(), base.green(), base.blue()
         horizontal = QLinearGradient(0, 0, rect.width(), 0)
-        horizontal.setColorAt(0.0, QColor(10, 12, 16, 245))
-        horizontal.setColorAt(0.55, QColor(10, 12, 16, 170))
-        horizontal.setColorAt(1.0, QColor(10, 12, 16, 90))
+        horizontal.setColorAt(0.0, QColor(red, green, blue, 245))
+        horizontal.setColorAt(0.55, QColor(red, green, blue, 170))
+        horizontal.setColorAt(1.0, QColor(red, green, blue, 80))
         painter.fillRect(rect, horizontal)
 
         vertical = QLinearGradient(0, rect.height() * 0.35, 0, rect.height())
-        vertical.setColorAt(0.0, QColor(10, 12, 16, 0))
-        vertical.setColorAt(1.0, QColor(C.BG))
+        vertical.setColorAt(0.0, QColor(red, green, blue, 0))
+        vertical.setColorAt(1.0, base)
         painter.fillRect(rect, vertical)
 
 
@@ -125,7 +131,7 @@ class DetailView(QWidget):
         back_column.addWidget(self._back, alignment=Qt.AlignmentFlag.AlignTop)
         back_column.addStretch(1)
 
-        self._poster = ArtView(206, 309, radius=12)
+        self._poster = ArtView(206, 309, radius=18)
         back_column.addWidget(self._poster)
         header.addLayout(back_column)
 
@@ -135,15 +141,13 @@ class DetailView(QWidget):
         header.addLayout(info, 1)
 
         self._eyebrow = QLabel()
-        self._eyebrow.setStyleSheet(
-            f"color: {C.ACCENT}; font-size: 9.5pt; font-weight: 700; letter-spacing: 1.2px;"
-        )
+        self._eyebrow.setTextFormat(Qt.TextFormat.RichText)
         info.addWidget(self._eyebrow)
 
         self._title = QLabel()
         self._title.setWordWrap(True)
-        self._title.setStyleSheet(f"color: {C.TEXT}; font-size: 27pt; font-weight: 700;")
-        info.addSpacing(4)
+        self._title.setMaximumWidth(_TITLE_W)
+        info.addSpacing(6)
         info.addWidget(self._title)
 
         self._tagline = QLabel()
@@ -152,9 +156,22 @@ class DetailView(QWidget):
         info.addWidget(self._tagline)
 
         self._meta = QLabel()
-        self._meta.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10.5pt;")
+        self._meta.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11pt;")
         info.addSpacing(8)
         info.addWidget(self._meta)
+
+        # How far along, as on Home's hero: the bar, and the time left.
+        self._progress_row = QWidget()
+        progress = QHBoxLayout(self._progress_row)
+        progress.setContentsMargins(0, 12, 0, 0)
+        progress.setSpacing(14)
+        self._progress = ProgressBar()
+        progress.addWidget(self._progress, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._left = QLabel()
+        self._left.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10.5pt;")
+        progress.addWidget(self._left)
+        progress.addStretch(1)
+        info.addWidget(self._progress_row)
 
         self._categories = CategoryEditor()
         self._categories.changed.connect(self._on_categories_changed)
@@ -183,41 +200,37 @@ class DetailView(QWidget):
         info.addSpacing(20)
         info.addWidget(button_row)
 
+        ratio = self.devicePixelRatioF()
         self._play = QPushButton("Play")
         self._play.setObjectName("Primary")
+        self._play.setIcon(QIcon(icon_pixmap("play", 20, C.PLAY_FG, ratio)))
+        self._play.setIconSize(QSize(20, 20))
+        self._play.setFixedHeight(52)
+        # Half the height at most: past half, Qt draws the corners square.
+        self._play.setStyleSheet("padding: 0 26px 0 20px; border-radius: 25px; font-size: 12.5pt;")
         self._play.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play.clicked.connect(self._on_play)
         buttons.addWidget(self._play)
 
-        self._restart = QPushButton("Start over")
-        self._restart.setObjectName("Ghost")
-        self._restart.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._restart = self._pill("Start over", "refresh")
         self._restart.clicked.connect(lambda: self.play_requested.emit(self._item, 0.0))
         buttons.addWidget(self._restart)
 
-        self._party = QPushButton("Start movie night")
-        self._party.setObjectName("Ghost")
-        self._party.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._party = self._pill("Start movie night", "people")
         self._party.setToolTip("Watch this with friends who have Mistery, in sync. Your own "
                                "place in it stays where it is.")
         self._party.clicked.connect(lambda: self.movie_night_requested.emit(self._item))
         buttons.addWidget(self._party)
 
-        self._vr = QPushButton("Play in VR")
-        self._vr.setObjectName("Ghost")
-        self._vr.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._vr = self._pill("Play in VR", "vr")
         self._vr.clicked.connect(lambda: self.play_in_vr_requested.emit(self._item))
         buttons.addWidget(self._vr)
 
-        self._watched = QPushButton()
-        self._watched.setObjectName("Ghost")
-        self._watched.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._watched = self._pill("", "check")
         self._watched.clicked.connect(self._toggle_watched)
         buttons.addWidget(self._watched)
 
-        self._folder = QPushButton("Open folder")
-        self._folder.setObjectName("Ghost")
-        self._folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._folder = self._pill("Open folder", "folder")
         self._folder.clicked.connect(self._open_folder)
         buttons.addWidget(self._folder)
 
@@ -233,9 +246,7 @@ class DetailView(QWidget):
         self._overview = QLabel()
         self._overview.setWordWrap(True)
         self._overview.setMaximumWidth(820)
-        self._overview.setStyleSheet(
-            f"color: {C.TEXT_DIM}; font-size: 11pt; line-height: 160%;"
-        )
+        self._overview.setStyleSheet("color: #E8E0D4; font-size: 12pt;")
         body_layout.addWidget(self._overview)
 
         details_title = QLabel("File details")
@@ -244,8 +255,9 @@ class DetailView(QWidget):
 
         details_card = QWidget()
         details_card.setObjectName("Card")
+        details_card.setStyleSheet("#Card { background: #161311; border: 1px solid #241F1B; border-radius: 22px; }")
         self._details = QGridLayout(details_card)
-        self._details.setContentsMargins(22, 20, 22, 20)
+        self._details.setContentsMargins(26, 22, 26, 22)
         self._details.setHorizontalSpacing(34)
         self._details.setVerticalSpacing(11)
         self._details.setColumnStretch(1, 1)
@@ -256,6 +268,16 @@ class DetailView(QWidget):
         self._art_note.setWordWrap(True)
         body_layout.addWidget(self._art_note)
         body_layout.addStretch(1)
+
+    def _pill(self, text: str, icon: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName("Ghost")
+        button.setIcon(QIcon(icon_pixmap(icon, 19, C.TEXT, self.devicePixelRatioF())))
+        button.setIconSize(QSize(19, 19))
+        button.setFixedHeight(52)
+        button.setStyleSheet("padding: 0 22px 0 18px; border-radius: 25px; font-size: 11.5pt;")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        return button
 
     # --- population ---------------------------------------------------------
 
@@ -270,12 +292,23 @@ class DetailView(QWidget):
         if item.is_episode:
             show = db.get_show(item.show_id) if item.show_id else None
             eyebrow = (show["title"] if show else "").upper()
-            self._eyebrow.setText(f"{eyebrow}   ·   {item.code}" if eyebrow else item.code)
+            words = f"{eyebrow}   ·   {item.code}" if eyebrow else item.code
         else:
-            self._eyebrow.setText("MOVIE")
-        self._eyebrow.setVisible(bool(self._eyebrow.text().strip()))
+            words = "FILM"
+        self._eyebrow.setText(
+            f'<span style="color: {C.ACCENT}; font-size: 9.5pt; font-weight: 700; letter-spacing: 1.4px;">'
+            f"{words}</span>" if words else "")
+        self._eyebrow.setVisible(bool(words))
 
-        self._title.setText(item.title or Path(item.path).stem)
+        # The biggest size the title fits on one line at, down to a floor.
+        title = item.title or Path(item.path).stem
+        size = _TITLE_SIZES[-1]
+        for size in _TITLE_SIZES:
+            if QFontMetrics(QFont(display_family(), size, QFont.Weight.Bold)).horizontalAdvance(title) <= _TITLE_W:
+                break
+        self._title.setStyleSheet(
+            f'color: {C.TEXT}; font-family: "{display_family()}"; font-size: {size}pt; font-weight: 700;')
+        self._title.setText(title)
 
         self._tagline.setText(item.tagline or "")
         self._tagline.setVisible(bool(item.tagline))
@@ -312,11 +345,16 @@ class DetailView(QWidget):
 
         resume = item.resume_position
         if resume > 0:
-            self._play.setText(f"Resume from {fmt_clock(resume)}")
+            self._play.setText(f"Resume · {fmt_clock(resume)}")
             self._restart.setVisible(True)
         else:
             self._play.setText("Play")
             self._restart.setVisible(False)
+        started = resume > 0 and bool(item.duration)
+        self._progress_row.setVisible(started)
+        if started:
+            self._progress.set_fraction(item.position / item.duration)
+            self._left.setText(fmt_remaining(item.position, item.duration))
 
         self._watched.setText("Mark unwatched" if item.watched else "Mark watched")
 

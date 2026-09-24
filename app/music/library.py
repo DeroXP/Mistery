@@ -807,4 +807,4 @@ def parse_palette(raw: str | None) -> dict:
         colours = json.loads(raw) if raw else None
     except ValueError:
         colours = None
-    return colours or {"dark": "#181818", "mid": "#2A2A2A", "accent": "#E50914"}
+    return colours or {"dark": "#181818", "mid": "#2A2A2A", "accent": "#FFD23F"}

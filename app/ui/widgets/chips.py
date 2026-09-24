@@ -9,8 +9,8 @@ a 1080p screen — the opposite of browsing.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QButtonGroup, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from ...metadata import categories as cat
 from ..theme import C
 from .flow import FlowLayout
+from .icons import icon_pixmap
 
 
 class _Popover(QWidget):
@@ -49,9 +50,9 @@ class _Popover(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         path = QPainterPath()
-        path.addRoundedRect(self.rect().adjusted(0, 0, -1, -1), 16, 16)
-        painter.fillPath(path, QColor(22, 22, 24, 250))
-        painter.setPen(QColor(255, 255, 255, 26))
+        path.addRoundedRect(self.rect().adjusted(0, 0, -1, -1), 22, 22)
+        painter.fillPath(path, QColor(C.SURFACE))
+        painter.setPen(QPen(QColor("#2B2520"), 1))
         painter.drawPath(path)
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -184,6 +185,15 @@ class CategoryFilter(QWidget):
     def has_categories(self) -> bool:
         return bool(self._available)
 
+    def set_pill_look(self) -> None:
+        """The button as a toolbar pill with a chevron (the Movies page's),
+        rather than a chip."""
+        self._button.setObjectName("Pill")
+        self._button.setFixedHeight(42)
+        self._button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self._button.setIcon(QIcon(icon_pixmap("chevron_down", 16, C.TEXT_DIM, self.devicePixelRatioF())))
+        self._button.setIconSize(QSize(16, 16))
+
     # --- reactions -----------------------------------------------------------
 
     def _open(self) -> None:
@@ -268,9 +278,12 @@ class CategoryEditor(QWidget):
         self._line.setObjectName("Ghost")
         self._line.setCursor(Qt.CursorShape.PointingHandCursor)
         self._line.setToolTip("Choose the categories this appears under")
+        # A pill: 30 high with a radius under half of it (the Ghost style's 22 on
+        # a 28-high button came out square, Qt's rule past half the height).
+        self._line.setFixedHeight(30)
         self._line.setStyleSheet(
             f"color: {C.TEXT_DIM}; font-size: 10pt; font-weight: 500;"
-            "text-align: left; padding: 4px 10px;"
+            "text-align: left; padding: 0 14px; border-radius: 14px;"
         )
         self._line.clicked.connect(self._open)
         row.addWidget(self._line)

@@ -55,7 +55,7 @@ class WaveformView(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._track = None
         self._levels: list[float] = []
-        self._accent = readable_accent("#E50914")
+        self._accent = readable_accent("#FFD23F")
         self._dim = 1.0
         self._playing = False
         self._position = 0.0

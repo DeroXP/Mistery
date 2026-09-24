@@ -24,7 +24,7 @@ from PySide6.QtGui import QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app import db
-from app.config import assets_dir, find_mpv, icon_path
+from app.config import assets_dir, find_mpv, icon_path, settings
 from app.ui.main_window import MainWindow
 from app.ui.theme import C
 
@@ -513,6 +513,10 @@ def main() -> int:
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
+    # Settings, Game controller: bigger text and buttons for across the room.
+    # Qt scales everything by this, and only reads it before the app exists.
+    if settings.get("couch_bigger") and "QT_SCALE_FACTOR" not in os.environ:
+        os.environ["QT_SCALE_FACTOR"] = "1.25"
     app = QApplication(sys.argv)
     app.setApplicationName("Mistery")
     app.setOrganizationName("Mistery")

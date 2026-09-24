@@ -1,13 +1,18 @@
-"""Browse pages: all movies, all shows, and search results."""
+"""Browse pages: all movies, all shows.
+
+A big title with a line saying what is here, a Find field and Shuffle (films);
+under it the toolbar (watched or not, categories, sort) and the grid.
+Search has a page of its own (search_view.py).
+"""
 
 from __future__ import annotations
 
 from collections import Counter
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QActionGroup, QIcon
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QButtonGroup, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .. import db
@@ -17,7 +22,10 @@ from ..models import MediaItem, ShowItem
 from .theme import C
 from .widgets.chips import CategoryFilter
 from .widgets.empty import EmptyState
+from .widgets.icons import icon_pixmap
+from .widgets.pill_field import PillField
 from .widgets.rows import CardGrid
+from .widgets.segments import SegmentTray
 
 # Shown when a whole section of the library has nothing in it yet.
 _EMPTY_LIBRARY = {
@@ -41,12 +49,6 @@ _EMPTY_LIBRARY = {
         "and auto-play-next across episodes.",
         "Add a library folder",
     ),
-    "search": (
-        "search",
-        "Search your library",
-        "Look up anything by title, genre, or plot. Two characters is enough to start.",
-        "",
-    ),
 }
 
 _SORTS = [
@@ -59,6 +61,62 @@ _SORTS = [
 ]
 
 _FILTERS = ["All", "Unwatched", "In progress", "Watched"]
+_NOUNS = {"movies": ("film", "Find in Movies"), "shows": ("show", "Find in Shows")}
+
+
+class _SortButton(QPushButton):
+    """The sort order, as a pill that opens a short menu. Answers like the
+    combo box it replaced (currentIndex, setCurrentIndex, currentIndexChanged)."""
+
+    currentIndexChanged = Signal(int)
+
+    def __init__(self, names: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self._names = names
+        self._index = 0
+        self.setObjectName("Pill")
+        self.setFixedHeight(42)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)      # the chevron on the right
+        self.setIcon(QIcon(icon_pixmap("chevron_down", 16, C.TEXT_DIM, self.devicePixelRatioF())))
+        self.setIconSize(QSize(16, 16))
+        self._menu = QMenu(self)
+        group = QActionGroup(self._menu)
+        group.setExclusive(True)
+        self._actions = []
+        for index, name in enumerate(names):
+            action = self._menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(index == 0)
+            action.triggered.connect(lambda _checked=False, which=index: self.setCurrentIndex(which))
+            group.addAction(action)
+            self._actions.append(action)
+        self.clicked.connect(self._open)
+        self._show()
+
+    def _open(self) -> None:
+        self._menu.setMinimumWidth(self.width())
+        self._menu.popup(self.mapToGlobal(self.rect().bottomLeft()) + QPoint(0, 8))
+
+    def _show(self) -> None:
+        self.setText(f"Sort: {self._names[self._index]}")
+
+    def currentIndex(self) -> int:  # noqa: N802 - the combo box's name
+        return self._index
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - the combo box's name
+        if index == self._index or not 0 <= index < len(self._names):
+            return
+        self._index = index
+        self._actions[index].setChecked(True)
+        self._show()
+        self.currentIndexChanged.emit(index)
+
+    def count(self) -> int:
+        return len(self._names)
+
+    def itemText(self, index: int) -> str:  # noqa: N802 - the combo box's name
+        return self._names[index]
 
 
 class LibraryView(QWidget):
@@ -67,62 +125,78 @@ class LibraryView(QWidget):
     open_media = Signal(object)
     open_show = Signal(object)
     add_folder_requested = Signal()
+    shuffle_requested = Signal(list)        # the films on screen, for a shuffled line-up
 
     def __init__(self, mode: str = "movies", parent=None) -> None:
         super().__init__(parent)
         self._mode = mode
         self._items: list = []
+        self._shown: list = []
         self._categories: dict[int, frozenset[str]] = {}
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(52, 34, 52, 0)
+        root.setContentsMargins(52, 30, 52, 0)
         root.setSpacing(18)
 
         title_row = QHBoxLayout()
+        title_row.setSpacing(12)
+        words = QVBoxLayout()
+        words.setSpacing(2)
         self._heading = QLabel()
         self._heading.setObjectName("PageTitle")
-        title_row.addWidget(self._heading)
-        title_row.addStretch(1)
+        words.addWidget(self._heading)
+        self._summary = QLabel()
+        self._summary.setObjectName("PageSummary")
+        words.addWidget(self._summary)
+        title_row.addLayout(words, 1)
 
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Search titles, genres, plots…")
-        self._search.setClearButtonEnabled(True)
-        self._search.setFixedWidth(320)
+        self._find = PillField(_NOUNS.get(mode, ("", "Find"))[1])
+        self._search = self._find.edit
         self._search.textChanged.connect(self._on_search_changed)
-        title_row.addWidget(self._search)
+        title_row.addWidget(self._find, 0, Qt.AlignmentFlag.AlignBottom)
+
+        self._shuffle = QPushButton("Shuffle")
+        self._shuffle.setObjectName("Pill")
+        self._shuffle.setFixedHeight(44)
+        self._shuffle.setIcon(QIcon(icon_pixmap("shuffle", 18, C.TEXT, self.devicePixelRatioF())))
+        self._shuffle.setIconSize(QSize(18, 18))
+        self._shuffle.setToolTip("Play the films shown here, in a shuffled order")
+        self._shuffle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._shuffle.clicked.connect(lambda: self.shuffle_requested.emit(list(self._shown)))
+        title_row.addWidget(self._shuffle, 0, Qt.AlignmentFlag.AlignBottom)
         root.addLayout(title_row)
 
         self._controls = QWidget()
         controls = QHBoxLayout(self._controls)
         controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(8)
+        controls.setSpacing(10)
+        tray = SegmentTray()
         self._filter_group = QButtonGroup(self)
         self._filter_group.setExclusive(True)
         for index, label in enumerate(_FILTERS):
             chip = QPushButton(label)
-            chip.setObjectName("Chip")
             chip.setCheckable(True)
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
             chip.setChecked(index == 0)
             self._filter_group.addButton(chip, index)
-            controls.addWidget(chip)
+            tray.add(chip)
         self._filter_group.idToggled.connect(lambda _id, on: on and self._apply())
+        controls.addWidget(tray)
 
-        controls.addSpacing(16)
         self._filter = CategoryFilter()
+        self._filter.set_pill_look()
         # Through the debounce, not straight to _apply: ticking three categories
         # would otherwise rebuild every card in the grid three times.
         self._filter.changed.connect(self._on_categories_changed)
         controls.addWidget(self._filter)
 
-        self._sort = QComboBox()
-        self._sort.addItems([name for name, _ in _SORTS])
+        self._sort = _SortButton([name for name, _ in _SORTS])
         self._sort.currentIndexChanged.connect(self._apply)
         controls.addWidget(self._sort)
 
         controls.addStretch(1)
         self._count = QLabel()
-        self._count.setObjectName("Faint")
+        self._count.setObjectName("SectionAside")
         controls.addWidget(self._count)
         root.addWidget(self._controls)
 
@@ -132,7 +206,7 @@ class LibraryView(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         holder = QWidget()
         holder_layout = QVBoxLayout(holder)
-        holder_layout.setContentsMargins(0, 0, 0, 40)
+        holder_layout.setContentsMargins(0, 4, 0, 40)
         self._grid = CardGrid()
         self._grid.item_clicked.connect(self._on_clicked)
         self._grid.item_play_requested.connect(self.play_requested.emit)
@@ -162,28 +236,27 @@ class LibraryView(QWidget):
 
     def set_mode(self, mode: str) -> None:
         self._mode = mode
-        self._heading.setText(
-            {"movies": "Movies", "shows": "Shows", "search": "Search"}.get(mode, "Library")
-        )
-        show_controls = mode != "search"
+        self._heading.setText({"movies": "Movies", "shows": "Shows"}.get(mode, "Library"))
+        self._search.setPlaceholderText(_NOUNS.get(mode, ("", "Find"))[1])
+        self._shuffle.setVisible(mode == "movies")
         # The category button hides itself as well when the library has no
         # categories at all — without a TMDB key that used to be every film, and
         # a button opening an empty popover is worse than no button.
-        self._filter.setVisible(show_controls and self._filter.has_categories())
-        self._sort.setVisible(show_controls)
-        for button in self._filter_group.buttons():
-            button.setVisible(show_controls)
-        if show_controls:
-            # "Any" is not remembered: it is the safe default and the one that
-            # never hides a title you expected to see.
-            self._filter.set_state(settings.get(self._settings_key) or [], "any")
-        if mode == "search":
-            self._search.setFocus()
+        self._filter.setVisible(self._filter.has_categories())
+        # "Any" is not remembered: it is the safe default and the one that
+        # never hides a title you expected to see.
+        self._filter.set_state(settings.get(self._settings_key) or [], "any")
+        self._apply()
+
+    def show_categories(self, names) -> None:
+        """Open on these categories, any of them (Home's "See all"), kept as the
+        page's choice like one made in its popover."""
+        self._filter.set_state(list(names), "any")
+        settings.set(self._settings_key, self._filter.selected())
         self._apply()
 
     def _on_categories_changed(self) -> None:
-        if self._mode != "search":
-            settings.set(self._settings_key, self._filter.selected())
+        settings.set(self._settings_key, self._filter.selected())
         self._debounce.start()
 
     def _show_empty(self, empty: bool) -> None:
@@ -213,11 +286,9 @@ class LibraryView(QWidget):
         if self._mode == "shows":
             rows = db.all_shows()
             self._items = [ShowItem.from_row(r) for r in rows]
-        elif self._mode == "movies":
+        else:
             rows = db.movies()
             self._items = [MediaItem.from_row(r) for r in rows]
-        else:
-            rows, self._items = [], []
 
         # Categories come off the database row, not the view model: `user_genres`
         # is a column of its own so a refetch can't wipe a hand-set category, and
@@ -228,23 +299,34 @@ class LibraryView(QWidget):
         counts = Counter(name for names in self._categories.values() for name in names)
         self._filter.set_available([(name, counts[name])
                                     for name in cat.CATEGORIES if name in counts])
-        self._filter.setVisible(self._mode != "search" and self._filter.has_categories())
+        self._filter.setVisible(self._filter.has_categories())
+        self._summary.setText(self._summary_line())
 
         self._apply()
 
+    def _summary_line(self) -> str:
+        """What is here, under the title: "12 films · 5 in progress · 3 watched"."""
+        items = self._items
+        noun = _NOUNS.get(self._mode, ("title", ""))[0]
+        bits = [f"{len(items)} {noun}{'' if len(items) == 1 else 's'}"]
+        if self._mode == "shows":
+            watching = sum(1 for show in items if 0 < show.watched_count < show.episode_count)
+            done = sum(1 for show in items if show.episode_count and show.watched_count >= show.episode_count)
+            if watching:
+                bits.append(f"{watching} you're part way through")
+            if done:
+                bits.append(f"{done} finished")
+        else:
+            started = sum(1 for film in items if not film.watched and film.resume_position > 0)
+            watched = sum(1 for film in items if film.watched)
+            if started:
+                bits.append(f"{started} in progress")
+            if watched:
+                bits.append(f"{watched} watched")
+        return "  ·  ".join(bits)
+
     def _apply(self) -> None:
         term = self._search.text().strip()
-
-        if self._mode == "search":
-            if len(term) < 2:
-                self._show_empty(True)
-                self._count.setText("")
-                return
-            items = [MediaItem.from_row(r) for r in db.search(term)]
-            self._show_empty(False)
-            self._grid.set_items(items, f"Nothing matches “{term}”")
-            self._count.setText(f"{len(items)} result(s)")
-            return
 
         if not self._items:
             # Nothing of this kind in the library at all — explain how to add some.
@@ -282,6 +364,8 @@ class LibraryView(QWidget):
 
         items.sort(key=_SORTS[self._sort.currentIndex()][1])
 
+        self._shown = items
+        self._shuffle.setEnabled(bool(items))
         self._grid.set_items(items, self._empty_message(term, chosen, mode, state))
         self._count.setText(f"{len(items)} of {len(self._items)}")
 
