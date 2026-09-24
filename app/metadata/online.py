@@ -193,17 +193,23 @@ def _download_image(url: str | None, name: str) -> str | None:
     return str(destination)
 
 
-def _art(url: str | None, name: str) -> tuple[str | None, str]:
-    """(saved image or None, the meta_state a lookup with it should get).
+def _art(url: str | None, name: str) -> tuple[str | None, str | None, str]:
+    """(saved image or None, the address it came from, the meta_state to use).
 
     'pending' when the image exists but has not arrived: 'done' is never looked
     at again, so a show or episode saved as done during a CDN hiccup kept a
     blank poster or still for good.
+
+    The address comes back only alongside a file that was actually saved, so
+    the pair always means "this picture is at this address" — Discord is shown
+    the address instead of the file, and the two must not describe different
+    pictures. See db.ART_URL_COLUMNS.
     """
     try:
-        return _download_image(url, name), "done"
+        saved = _download_image(url, name)
     except _ImageUnavailable:
-        return None, "pending"
+        return None, None, "pending"
+    return saved, (url if saved else None), "done"
 
 
 def _normalise(text: str) -> str:
@@ -236,7 +242,7 @@ def tvmaze_show(title: str, year: int | None) -> dict | None:
 
     show_id = int(data["id"])
     image = (data.get("image") or {}).get("original")
-    poster, state = _art(image, f"tvmaze-{show_id}-poster")
+    poster, poster_url, state = _art(image, f"tvmaze-{show_id}-poster")
     fields = {
         "tvmaze_id": show_id,
         "title": data.get("name") or title,
@@ -244,6 +250,7 @@ def tvmaze_show(title: str, year: int | None) -> dict | None:
         "genres": ", ".join(data.get("genres") or []) or None,
         "rating": (data.get("rating") or {}).get("average"),
         "poster": poster,
+        "poster_url": poster_url,
         "meta_state": state,
     }
     if premiered.isdigit():
@@ -268,12 +275,15 @@ def tvmaze_episode_fields(tvmaze_id: int, season: int, episode: int) -> dict | N
     if entry is None:
         return None
     still = (entry.get("image") or {}).get("original")
-    backdrop, state = _art(still, f"tvmaze-{int(tvmaze_id)}-s{season:02d}e{episode:02d}")
+    backdrop, backdrop_url, state = _art(
+        still, f"tvmaze-{int(tvmaze_id)}-s{season:02d}e{episode:02d}"
+    )
     fields = {
         "title": entry.get("name") or None,
         "overview": _strip_html(entry.get("summary")),
         "rating": (entry.get("rating") or {}).get("average"),
         "backdrop": backdrop,
+        "backdrop_url": backdrop_url,
         "meta_state": state,
         "meta_source": "tvmaze",
     }
@@ -350,10 +360,11 @@ def wikipedia_movie(title: str, year: int | None) -> dict | None:
 
     image = ((data.get("originalimage") or {}).get("source")
              or (data.get("thumbnail") or {}).get("source"))
-    poster, state = _art(image, f"wiki-{_normalise(title)}-{year or 'na'}")
+    poster, poster_url, state = _art(image, f"wiki-{_normalise(title)}-{year or 'na'}")
     fields = {
         "overview": (data.get("extract") or "").strip() or None,
         "poster": poster,
+        "poster_url": poster_url,
         "meta_state": state,
         "meta_source": "wikipedia",
     }

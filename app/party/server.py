@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import ssl
 import threading
@@ -60,6 +61,11 @@ from . import transcode
 _log = logging.getLogger("party.server")
 
 SYNC_GREETING = b"MISTERY-SYNC/1"
+# Library sharing, on this same listener: a friend whose certificate was
+# recognised in the handshake (SHARE), and somebody with a code who has no
+# certificate here yet (PAIR). Both go to share_handler.
+SHARE_GREETING = b"MISTERY-SHARE/1"
+PAIR_GREETING = b"MISTERY-PAIR/1"
 # What a guest can ask /media for. Each guest chooses their own: here the
 # host's upload is not the limit (909 Mbit/s measured, against 11.7 for the
 # heaviest film); a friend's download, or a PC that cannot decode 4K HEVC
@@ -105,6 +111,20 @@ class _Media:
     quality: str                 # original | 1080p | 720p
     generation: int
     subtitles: tuple[str, ...]   # full paths, in the order guests number them
+
+
+@dataclass
+class _Offer:
+    """One thing a friend may fetch, and until when (library sharing).
+
+    A movie night has one token for one file. Sharing has a token per thing a
+    friend asked to play, because two friends can be watching two different
+    films at once, and neither is "what this PC is sharing tonight".
+    """
+    media: _Media
+    friend_id: int
+    expires: float
+    used_at: float
 
 
 class _Connection:
@@ -263,13 +283,25 @@ class PartyServer:
     # watching the original takes no slot.
     max_transcodes = 6
     max_line = 4096
+    # Library sharing: how many things may be on offer to friends at once,
+    # and how long one lasts without being fetched. Four hours covers a film
+    # somebody paused, and every fetch pushes it out again.
+    max_offers = 64
+    offer_life = 4 * 3600.0
     max_head = 8192
     max_headers = 64
     chunk = 256 * 1024
 
-    def __init__(self, identity, token: bytes | str, port: int, bind: str = "0.0.0.0") -> None:
+    def __init__(self, identity, token: bytes | str, port: int, bind: str = "0.0.0.0", *,
+                 context: ssl.SSLContext | None = None, share_handler=None) -> None:
         self.sync_handler = None
-        self._context: ssl.SSLContext = identity.server_context()
+        # Library sharing hands this listener a context of its own: the one
+        # built on the install's lasting certificate, which also asks a friend's
+        # Mistery for theirs (app/share/identity.py). A movie night on its own
+        # uses the session certificate, as it always has.
+        self.share_handler = share_handler
+        self._context: ssl.SSLContext = (
+            context if context is not None else identity.server_context())
         token_hex = token.hex() if isinstance(token, (bytes, bytearray)) else str(token).lower()
         self._token = token_hex.encode("ascii")
         self._bind = bind
@@ -284,7 +316,16 @@ class PartyServer:
         self._transcodes = 0
         self._media: _Media | None = None
         self._generation = 0
+        self._offers: dict[bytes, _Offer] = {}          # token -> what a friend may fetch
         self.refusals: collections.Counter = collections.Counter()     # reason -> count
+        # Called (on the ending thread) when a movie night hosted on this
+        # listener with host_party is over. The sharer uses it for a stop it
+        # held back while the movie night was on.
+        self.after_party = None
+        # Who else may join the movie night on this listener besides holding
+        # its token (host_party's `admit`): None for anyone who has it.
+        self._admit = None
+        self._refusal = ""
 
     # --- what is being shared ------------------------------------------------
 
@@ -332,6 +373,122 @@ class PartyServer:
                   os.path.basename(path), resolved, len(subtitles))
         return resolved
 
+    # --- what a friend may fetch (library sharing) ---------------------------
+
+    def offer(self, path: str | Path, duration: float | None, friend_id: int,
+              quality: str = "original", life: float | None = None) -> str:
+        """Let one friend fetch one file, and return the token that does it.
+
+        Separate from set_media on purpose. set_media is "this is what the
+        movie night is watching", one file for everyone; an offer is "you asked
+        for this, here is a way to get it", one per friend and thing, and it
+        expires. The token is 104 random bits, like a movie night's, and it is
+        the only way anything of this library can be reached: no path a friend
+        sends is ever turned into a file (see the module docstring).
+
+        An offer is kept alive by being used, so a friend watching a two-hour
+        film does not lose it half way through, and is forgotten when they
+        stop. The least recently used goes when there are too many.
+        """
+        path = os.fspath(path)
+        stat = os.stat(path)
+        resolved = transcode.resolve_quality(quality, stat.st_size, duration)
+        if resolved != "original" and not (find_ffmpeg() and transcode.pick_encoder()):
+            resolved = "original"
+        media = _Media(path, stat.st_size, stat.st_mtime, float(duration or 0.0), resolved,
+                       # Offers are outside the movie night's generations: a
+                       # host changing film must not cut off a friend watching
+                       # something else entirely.
+                       -1, _sidecar_subtitles(path))
+        token = secrets.token_hex(13).encode("ascii")
+        now = time.monotonic()
+        with self._lock:
+            self._offers[token] = _Offer(media, int(friend_id), now + (life or self.offer_life), now)
+            while len(self._offers) > self.max_offers:
+                oldest = min(self._offers, key=lambda key: self._offers[key].used_at)
+                del self._offers[oldest]
+        return token.decode("ascii")
+
+    def withdraw(self, token: str | bytes) -> None:
+        """Forget an offer: the friend stopped watching, or was removed."""
+        key = token if isinstance(token, bytes) else str(token).encode("ascii")
+        with self._lock:
+            self._offers.pop(key, None)
+
+    def withdraw_all(self, friend_id: int | None = None) -> int:
+        """Forget every offer, or every one made to a friend who is now gone."""
+        with self._lock:
+            gone = [key for key, offer in self._offers.items()
+                    if friend_id is None or offer.friend_id == friend_id]
+            for key in gone:
+                del self._offers[key]
+        return len(gone)
+
+    def _offered(self, token: bytes) -> _Media | None:
+        """The file an offer token stands for, if it is still good."""
+        now = time.monotonic()
+        with self._lock:
+            offer = self._offers.get(token)
+            if offer is None:
+                return None
+            if offer.expires < now:
+                del self._offers[token]
+                return None
+            offer.used_at = now
+            offer.expires = max(offer.expires, now + self.offer_life)
+            return offer.media
+
+    # --- a movie night on the sharing listener ---------------------------------
+
+    @property
+    def hosting(self) -> bool:
+        """Whether a movie night's token opens anything here right now."""
+        return bool(self._token)
+
+    def host_party(self, token: bytes | str, admit=None, refusal: str = "") -> None:
+        """Hold a movie night on this listener, which library sharing opened.
+
+        Sharing keeps the port whenever it is on, and a second listener cannot
+        bind a port that is taken, so a movie night borrows this one: its token
+        opens the film from now until end_party. The certificate stays this
+        install's own, so the invite carries that one's pin. sync_handler and
+        set_media work as they always have.
+
+        `admit`, when given, is asked about every connection that shows the
+        token, room and film alike, with the certificate the connection showed
+        (None for none): a friend's movie night on this PC's film lets in only
+        this PC's friends (app/share/nights.py). Without it, the token is enough.
+        `refusal` is the sentence a guest it turns away reads.
+        """
+        token_hex = token.hex() if isinstance(token, (bytes, bytearray)) else str(token).lower()
+        with self._lock:
+            if self._token:
+                raise ServerError("A movie night is already using this listener.")
+            self._token = token_hex.encode("ascii")
+            self._admit = admit
+            self._refusal = refusal or "This movie night is only for some people, and not you."
+
+    def end_party(self) -> None:
+        """The movie night is over; the listener carries on serving friends.
+
+        Its token stops working, and every connection still sending its film
+        is closed. The sync channels are the room's to close (room.end(), which
+        comes first). What friends are fetching is not touched: offers belong
+        to no movie night.
+        """
+        with self._lock:
+            self._token = b""
+            self._admit = None
+            self.sync_handler = None
+            self._media = None
+            self._generation += 1
+            stale = [c for c in self._connections.values() if c.generation is not None]
+        for connection in stale:
+            self._close_connection(connection)
+        after, self.after_party = self.after_party, None
+        if after is not None:
+            after()
+
     @staticmethod
     def _warm_up(path: str) -> None:
         if transcode.pick_encoder():
@@ -353,11 +510,20 @@ class PartyServer:
         media = self._media
         return media.quality if media else None
 
-    def subtitles(self) -> list[dict]:
+    def subtitles(self, token: str | bytes | None = None) -> list[dict]:
         """The external subtitles guests can fetch at /subs/<n>:
         [{"n": 0, "title": "en forced", "lang": "en"}, ...]. A guest gets the
-        same list from GuestProxy.subtitles()."""
-        media = self._media
+        same list from GuestProxy.subtitles().
+
+        With an offer's token, the ones beside the file offered to a friend
+        instead: what the movie night is watching has nothing to do with it."""
+        if token is None:
+            media = self._media
+        else:
+            key = token if isinstance(token, bytes) else str(token).encode("ascii")
+            with self._lock:
+                offer = self._offers.get(key)
+            media = offer.media if offer is not None else None
         return self._subtitle_list(media) if media is not None else []
 
     @staticmethod
@@ -500,6 +666,8 @@ class PartyServer:
             first = self._read_line(conn, deadline)
             if first.startswith(SYNC_GREETING + b" "):
                 handed_over = self._hand_to_sync(conn, connection, peer, first)
+            elif first.startswith((SHARE_GREETING, PAIR_GREETING)):
+                handed_over = self._hand_to_share(conn, connection, peer, first)
             elif first.endswith((b" HTTP/1.1", b" HTTP/1.0")):
                 self._http(conn, connection, first, deadline)
             else:
@@ -545,7 +713,27 @@ class PartyServer:
                 raise _Refused("line too long")
 
     def _token_ok(self, given: bytes) -> bool:
-        return hmac.compare_digest(given, self._token)
+        # No token is no movie night (a sharing listener between movie nights):
+        # nothing matches it, not even an empty one.
+        token = self._token
+        return bool(token) and hmac.compare_digest(given, token)
+
+    def _admitted(self, conn) -> bool:
+        """Whether a connection with the movie night's token may take part:
+        yes, unless host_party was given `admit` and it says no to the
+        certificate this connection showed."""
+        admit = self._admit
+        if admit is None:
+            return True
+        try:
+            certificate = conn.getpeercert(binary_form=True)
+        except (ValueError, OSError):
+            certificate = None
+        try:
+            return bool(admit(certificate))
+        except Exception:                   # noqa: BLE001 - a check that breaks lets nobody in
+            _log.exception("the movie night's admission check failed")
+            return False
 
     def _known(self, connection: _Connection) -> None:
         """No longer a stranger: it showed the token (or it is gone)."""
@@ -565,6 +753,16 @@ class PartyServer:
         handler = self.sync_handler
         if len(parts) != 2 or not self._token_ok(parts[1]):
             raise _Refused("wrong token")
+        if not self._admitted(conn):
+            # In the room's own words (sync.Client reads a "refused" first), so
+            # the guest turned away is told why rather than that nothing answered.
+            try:
+                conn.settimeout(5.0)
+                conn.sendall(json.dumps({"type": "refused", "reason": self._refusal}).encode("utf-8")
+                             + b"\n")
+            except OSError:
+                pass
+            raise _Refused("not let in to this movie night")
         if handler is None:
             raise _Refused("no sync handler")
         self._known(connection)
@@ -573,6 +771,27 @@ class PartyServer:
         # life of the channel (the connection's slot stays taken until it
         # returns) or give the socket to a thread of its own and return.
         handler(conn, peer)
+        return True
+
+    def _hand_to_share(self, conn, connection: _Connection, peer, line: bytes) -> bool:
+        """A friend's channel, or somebody pairing. The handler takes the socket.
+
+        What the two have in common is that they are Mistery, not a browser or a
+        scanner. What they do not: a friend's connection showed a certificate
+        this PC recognised during the handshake, and pairing cannot have —
+        there is nothing to recognise yet. So a friend stops counting against
+        the strangers from their address, and pairing does not. Somebody
+        opening connections and saying MISTERY-PAIR/1 is a stranger holding a
+        stranger's place, which is exactly what those limits are for.
+        """
+        handler = self.share_handler
+        if handler is None:
+            raise _Refused("not sharing")
+        certificate = conn.getpeercert(binary_form=True)
+        if certificate is not None:
+            self._known(connection)
+        conn.settimeout(None)               # the channel keeps its own time
+        handler(conn, peer, line, certificate)
         return True
 
     # --- HTTP --------------------------------------------------------------------
@@ -607,8 +826,15 @@ class PartyServer:
         asked = parse_media_query(match.group("query")) if match is not None else None
         # A quality nobody offers gets the same bare 404 as a wrong token: the
         # port says nothing to anyone about what it would have answered.
+        token = match.group("token").encode("ascii") if match is not None else b""
+        # Either the movie night's one token, or one of the offers made to a
+        # friend (library sharing). Both are 104 random bits, and anything else
+        # gets the same bare 404: this port tells nobody what it would have
+        # answered.
+        offered = self._offered(token) if (asked is not None and not self._token_ok(token)) else None
+        night = self._token_ok(token) and self._admitted(conn)
         if (method not in (b"GET", b"HEAD") or asked is None
-                or not self._token_ok(match.group("token").encode("ascii"))):
+                or not (night or offered is not None)):
             conn.settimeout(5.0)
             conn.sendall(_NOT_FOUND)
             raise _Refused("wrong token or path")
@@ -617,9 +843,11 @@ class PartyServer:
         with self._lock:
             # Read together, so set_media either sees this connection as
             # serving the old film or default (and closes it) or it gets the
-            # new one.
-            media = self._media
-            if media is not None and match.group("media"):
+            # new one. An offer is nobody's default and belongs to no
+            # generation: changing what the movie night watches leaves a friend
+            # watching something else alone.
+            media = offered if offered is not None else self._media
+            if offered is None and media is not None and match.group("media"):
                 connection.generation = media.generation
                 connection.default = None if asked_quality else media.quality
         if media is None or self._stopping.is_set():

@@ -185,11 +185,26 @@ def run(check_only: bool = False) -> int:
         paths.log(f"not applying: {waiting}. The download is kept for the next run.")
         return SKIPPED
 
+    # The Mistery serving friends with no window holds Mistery.exe open too.
+    # It steps aside for the few seconds the files take, and is started again
+    # from the new ones (or the old, if they could not go in) straight after.
+    sharing = liveness.stop_sharer()
+    if sharing is False:
+        paths.log("not applying: the Mistery serving friends did not step aside. "
+                  "The download is kept for the next run.")
+        return SKIPPED
+    if sharing:
+        paths.log("the Mistery serving friends stepped aside for the update")
     try:
         result = apply_files.move_into_place(paths.unpack_dir(), install)
     except Refused as exc:
         paths.log(f"NOT APPLIED: {exc}")
         return NOT_APPLIED
+    finally:
+        if sharing:
+            started = liveness.start_sharer(install)
+            paths.log("started serving friends again" if started else
+                      "could not start serving friends again; it starts at the next sign-in")
 
     # version.txt normally comes out of the zip; write it if the build forgot,
     # so that the next run does not offer the same update again forever.

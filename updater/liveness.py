@@ -46,9 +46,11 @@ from __future__ import annotations
 
 import ctypes
 import getpass
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -207,9 +209,13 @@ def _mutex_says_running() -> str | None:
 
 
 def _image_says_running() -> str | None:
-    """Any process called Mistery.exe, wherever it was started from."""
+    """Any process called Mistery.exe, wherever it was started from, except
+    the one serving friends with no window (sharer_pid): that one steps aside
+    when asked (stop_sharer), and blocking every update on it would block
+    them for as long as the PC is on."""
     if os.name != "nt":
         return None
+    serving = sharer_pid()
     dll = _kernel32()
     snapshot = dll.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
     if not snapshot or snapshot == _INVALID_HANDLE_VALUE:
@@ -222,7 +228,7 @@ def _image_says_running() -> str | None:
         wanted = paths.APP_EXE_NAME.lower()
         ok = dll.Process32FirstW(ctypes.c_void_p(snapshot), ctypes.byref(entry))
         while ok:
-            if entry.szExeFile.lower() == wanted:
+            if entry.szExeFile.lower() == wanted and entry.th32ProcessID != serving:
                 return (f"{entry.szExeFile} is running as pid "
                         f"{entry.th32ProcessID}")
             ok = dll.Process32NextW(ctypes.c_void_p(snapshot), ctypes.byref(entry))
@@ -231,16 +237,144 @@ def _image_says_running() -> str | None:
         dll.CloseHandle(ctypes.c_void_p(snapshot))
 
 
-def running_reason() -> str | None:
-    """One line saying Mistery is running, or None if all three checks say no.
+# --- the Mistery serving friends, with no window ------------------------------
+#
+# Mistery.exe --share (the app's app/share/background.py) serves a person's
+# library to their friends while the app itself is closed, from sign-in on. It
+# is Mistery.exe, so the image check above would see it, and it never quits by
+# itself. Three things let the updater live with it: it writes share.lock (its
+# pid and start time, the way the app writes app.lock) so it can be told apart
+# from the app; it leaves when its stop event is set; and it is started again
+# once the new files are in. Its names are built exactly as that module builds
+# them, MISTERY_DATA_DIR and all, so a test's throwaway data folder gets names
+# of its own.
 
-    Order is cheapest first: the mutex is one system call, the lock is a small
-    read, the process list is a snapshot of every process on the machine (5 ms
+SHARE_LOCK = "share.lock"
+
+
+def _sharing_tag() -> str:
+    tag = user_tag()
+    elsewhere = os.environ.get("MISTERY_DATA_DIR")
+    if elsewhere:
+        digest = hashlib.sha256(str(Path(elsewhere).resolve()).lower().encode())
+        tag += "-" + digest.hexdigest()[:8]
+    return tag
+
+
+def sharer_stop_event() -> str:
+    return "Local\\Mistery-sharing-stop-" + _sharing_tag()
+
+
+def sharer_pid() -> int | None:
+    """The pid of the Mistery serving friends, if share.lock names a live one."""
+    return _live_pid(SHARE_LOCK)
+
+
+# A friend's movie night on this PC's film (the app's app/share/nights.py),
+# usually held by the Mistery with no window: night.lock names the process
+# holding it for as long as it is on. Replacing the files under it would cut the
+# friends off mid-film, so the updater waits for it as it waits for an open
+# Mistery, and tries again on a later run.
+NIGHT_LOCK = "night.lock"
+
+
+def _night_says_running() -> str | None:
+    pid = _live_pid(NIGHT_LOCK)
+    return f"night.lock: friends are watching a film from this PC (pid {pid})" if pid else None
+
+
+def _live_pid(name: str) -> int | None:
+    """The pid a lock file in the data folder names, if it is still that process.
+
+    Checked like app.lock: a pid Windows has since handed to another process
+    (one created after the lock was written) is not it.
+    """
+    data = paths.data_dir()
+    if data is None or os.name != "nt":
+        return None
+    try:
+        parts = (data / name).read_text(encoding="utf-8").strip().split(",")
+        pid = int(parts[0])
+        started = float(parts[1]) if len(parts) > 1 else None
+    except (OSError, ValueError, IndexError):
+        return None
+    if pid <= 0:
+        return None
+    dll = _kernel32()
+    handle = dll.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        code = ctypes.c_ulong()
+        if (not dll.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
+                or code.value != _STILL_ACTIVE):
+            return None
+        created = _created_at(dll, handle)
+        if started is not None and created is not None and created > started + 2:
+            return None
+        return pid
+    finally:
+        dll.CloseHandle(ctypes.c_void_p(handle))
+
+
+def stop_sharer(timeout: float = 15.0) -> bool | None:
+    """Ask the Mistery serving friends to leave, and wait for it to.
+
+    None when there is none; True once it has gone; False when it is still
+    there after `timeout` (the caller must then not touch the files).
+    """
+    pid = sharer_pid()
+    if pid is None:
+        return None
+    dll = _kernel32()
+    dll.OpenEventW.restype = ctypes.c_void_p
+    dll.OpenEventW.argtypes = (ctypes.c_ulong, ctypes.c_bool, ctypes.c_wchar_p)
+    dll.SetEvent.argtypes = (ctypes.c_void_p,)
+    dll.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+    dll.WaitForSingleObject.restype = ctypes.c_ulong
+    process = dll.OpenProcess(_SYNCHRONIZE, False, pid)
+    if not process:
+        return True                     # gone between the two looks
+    try:
+        event = dll.OpenEventW(0x0002, False, sharer_stop_event())     # EVENT_MODIFY_STATE
+        if not event:
+            return False                # running, but with no way to ask it
+        try:
+            dll.SetEvent(ctypes.c_void_p(event))
+        finally:
+            dll.CloseHandle(ctypes.c_void_p(event))
+        return dll.WaitForSingleObject(ctypes.c_void_p(process), int(timeout * 1000)) == 0
+    finally:
+        dll.CloseHandle(ctypes.c_void_p(process))
+
+
+def start_sharer(install: Path) -> bool:
+    """Start the Mistery serving friends again, from the files just put in."""
+    exe = Path(install) / paths.APP_EXE_NAME
+    if os.name != "nt" or not exe.is_file():
+        return False
+    flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+             | subprocess.CREATE_NO_WINDOW)
+    try:
+        subprocess.Popen([str(exe), "--share"], cwd=str(install), creationflags=flags,
+                         close_fds=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return False
+    return True
+
+
+def running_reason() -> str | None:
+    """One line saying Mistery is running, or None if all four checks say no.
+
+    Order is cheapest first: the mutex is one system call, the locks are small
+    reads, the process list is a snapshot of every process on the machine (5 ms
     here, measured on a machine with 320 of them).
     """
     if sys.platform != "win32":
         return None                     # nothing here works anywhere else
-    for check in (_mutex_says_running, _lock_says_running, _image_says_running):
+    for check in (_mutex_says_running, _lock_says_running, _night_says_running,
+                  _image_says_running):
         try:
             reason = check()
         except Exception as exc:        # a check that breaks must not update

@@ -18,11 +18,13 @@ class ArtView(QWidget):
         self._path: str | None = None
         self.setFixedSize(QSize(width, height))
 
-    def set_art(self, path: str | None, title: str = "") -> None:
+    def set_art(self, path: str | None, title: str = "", *, framed: bool = False) -> None:
+        """`framed` shows a poster whole in a wide panel (images.framed_pixmap)."""
         self._path, self._title = path, title
         self._pixmap = art_pixmap(
             path, title, self.width(), self.height(), self._radius,
             self.devicePixelRatioF(), lambda pixmap, wanted=path: self._on_ready(pixmap, wanted),
+            framed=framed,
         )
         self.update()
 

@@ -10,6 +10,12 @@ Discord exposes a local IPC socket (a named pipe on Windows). Frames are a
 All pipe work happens on a worker thread, every read and write on the pipe has
 a deadline, and every failure is swallowed: Discord being closed, hung, or
 never installed must never disturb playback or keep Mistery from quitting.
+
+The picture on the card is settled in _resolve_art. It can be a public https
+URL — Discord's own media proxy fetches the picture, so artwork that already
+has a public address (TMDB, TVmaze, Wikimedia) needs nothing uploaded — or the
+name of an image uploaded to the application by hand, which is still the only
+way to show art Mistery composed itself out of a film's own frames.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ import struct
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 
 if sys.platform == "win32":
@@ -38,6 +45,102 @@ else:
 _log = logging.getLogger("discord")
 
 _KEY_UNSAFE = re.compile(r"[^a-z0-9]+")
+
+# What an uploaded image can be called: Discord's Art Assets page accepts 2-32
+# characters of lowercase letters, digits, dashes and underscores. Anything
+# else in the picture field is either a URL or nothing we could ask for, and
+# knowing the difference saves asking discord.com about a value it can't have.
+_KEY_SHAPE = re.compile(r"^[a-z0-9_-]{2,32}$")
+
+# The longest picture URL that may go to Discord. The three places Mistery
+# gets artwork from are short: a TMDB poster is about 67 characters, a TVmaze
+# still about 70, and the worst Wikimedia thumbnail this library could produce
+# — the file name carries the percent-encoded title twice — measured 188
+# across 257 titles. 512 is nearly three times that, so nothing real is cut,
+# while a runaway string can't bloat the frame or fill Discord's logs.
+MAX_IMAGE_URL = 512
+
+# Spaces, tabs, newlines and control characters have no business in a URL:
+# they would either break the JSON frame or smuggle a second line into it.
+_URL_UNSAFE = re.compile(r"[\s\x00-\x1f\x7f]")
+
+# A host name the rest of the world could look up. Written as "must end in a
+# dotted name with a letters-only ending" so that "localhost", "127.0.0.1",
+# "[::1]", "nas", "printer.lan" and "pc.local" all fail: Discord's proxy could
+# never fetch them, and the name alone would say something about the owner's
+# own network.
+_PUBLIC_HOST = re.compile(
+    r"^(?!.*\.(local|lan|internal|intranet|home\.arpa)$)"
+    r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*"
+    r"\.[a-z]{2,}$",
+    re.I,
+)
+
+
+def public_image_url(value: str) -> str:
+    """The value as a picture URL fit to hand Discord, or '' if it isn't one.
+
+    Discord's media proxy fetches whatever URL the activity carries, so this
+    string leaves the PC and is read by Discord's servers. Only something
+    already published on the open internet may go, and only in a shape that
+    can't carry anything else:
+
+      * https only. http would be fetched in the clear, and a Windows path or
+        a file:// URL names something on this machine, not on the web.
+      * a host the world can resolve — no localhost, no LAN name, no bare IP.
+      * no user:password@ in front of the host: that is a credential.
+      * no query string and no fragment. All three artwork sources serve
+        pictures from a plain path, so a '?' here would only ever be an API
+        key, a signed link or a session token riding along.
+      * at most MAX_IMAGE_URL characters, and no whitespace or control bytes.
+
+    Returned exactly as given, never lowercased: TMDB and Wikimedia paths are
+    case-sensitive and a flattened one is a 404.
+    """
+    text = str(value or "").strip()
+    if not text or len(text) > MAX_IMAGE_URL or _URL_UNSAFE.search(text):
+        return ""
+    if not text.lower().startswith("https://"):
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:                  # a malformed IPv6 literal, say
+        return ""
+    if parts.scheme != "https" or parts.query or parts.fragment:
+        return ""
+    if "@" in parts.netloc:
+        return ""
+    try:
+        host = parts.hostname or ""
+    except ValueError:
+        return ""
+    return text if _PUBLIC_HOST.match(host) else ""
+
+
+def _asset_match(key: str, known: set[str]) -> str:
+    """The name Discord holds for this key, spelled its way, or ''.
+
+    Ignoring case belongs here and nowhere else. The keys Mistery builds are
+    lowercase (asset_key), the names Discord reports are kept as it reports
+    them, and what goes back on the card has to be the name it actually has —
+    so the two are compared without case and Discord's spelling is what is
+    sent. The exact hit is tried first; the walk only happens on a miss, over
+    a few hundred names at most.
+    """
+    if not key or not known:
+        return ""
+    if key in known:
+        return key
+    lowered = key.lower()
+    return next((name for name in known if name.lower() == lowered), "")
+
+
+def _image_of(payload: dict) -> str:
+    """The picture an outgoing frame carries, for comparing two of them."""
+    activity = (payload.get("args") or {}).get("activity")
+    if not isinstance(activity, dict):
+        return ""
+    return str((activity.get("assets") or {}).get("large_image") or "")
 
 
 # Discord's Art Assets want 16:9, at least 512x288; 1024x576 is the size the
@@ -100,6 +203,47 @@ def compose_wide_art(source: str, destination: str, backdrop: str = "") -> bool:
         return False
 
 
+def album_asset_key(artist: str, album: str) -> str:
+    """The asset name for an album's cover: "alb-", the album artist, the title.
+
+    Songs used to ask for asset_key(album) alone, and nothing was ever uploaded
+    under it, so it never mattered that two Greatest Hits by two artists would
+    share one picture, or that an album named like a film ("Purple Rain") would
+    take the film's poster or give its own away. Covers are uploaded now, so the
+    artist keeps albums apart and "alb" keeps them apart from films. Films keep
+    their plain names on purpose: the owner has already uploaded those.
+    """
+    return asset_key(f"alb {artist or ''} {album or ''}")
+
+
+def list_assets(client_id: str, timeout: float = 6.0) -> set[str] | None:
+    """The images uploaded to a Discord application, as Discord spells them.
+
+    None when the list cannot be read. Discord publishes it without
+    authentication, so this needs no token and nothing of the owner's account;
+    it is the same list DiscordPresence.known_assets keeps, fetched once for
+    the export, which asks it what is already there before writing anything.
+    """
+    if not client_id:
+        return None
+    try:
+        import requests
+
+        response = requests.get(
+            f"https://discord.com/api/v9/oauth2/applications/{client_id}/assets",
+            timeout=timeout)
+        if response.status_code != 200:
+            return None
+        listed = response.json()
+    except Exception as exc:                    # the export must still work offline
+        _log.info("could not list Discord art: %s", exc)
+        return None
+    if not isinstance(listed, list):
+        return None
+    return {str(entry.get("name") or "") for entry in listed
+            if isinstance(entry, dict) and entry.get("name")}
+
+
 def asset_key(title: str) -> str:
     """Turn a title into a Discord asset name, or '' if it can't be one.
 
@@ -143,6 +287,14 @@ _RECONNECT_DELAY = 30.0     # don't hammer the pipe when Discord is closed
 _MAX_RECONNECT_DELAY = 30 * 60.0
 _REPLY_TIMEOUT = 5.0        # Discord answers a handshake in milliseconds
 _WRITE_TIMEOUT = 5.0
+# How long a fetched list of uploaded art is trusted, and how long to wait
+# before asking again after a fetch that failed. The same ten minutes for both,
+# for one reason: art is uploaded by hand in a browser and then the owner comes
+# back to Mistery, so noticing it within ten minutes is soon enough, while an
+# evening of playback asks discord.com at most six times an hour. It used to be
+# fetched once and kept for the life of the object, so art uploaded after
+# Mistery started never showed up until it was restarted.
+_ASSET_TTL = 10 * 60.0
 _ASSET_RETRY = 10 * 60.0    # after the art list could not be fetched
 _STOP_WAIT = 0.5            # how long stop() lets the worker close its pipe
 _POLL_MS = 100              # how often a pipe wait checks for stop()
@@ -174,6 +326,10 @@ class _Pipe:
             path, _winapi.GENERIC_READ | _winapi.GENERIC_WRITE, 0, _winapi.NULL,
             _winapi.OPEN_EXISTING, _winapi.FILE_FLAG_OVERLAPPED, _winapi.NULL,
         )
+        # The tail of a reply frame that hasn't all arrived yet. Replies are
+        # drained in whatever size the pipe hands over, so the last one is
+        # regularly cut in half; kept here until the rest turns up.
+        self.spare = b""
 
     def _finish(self, overlapped, error: int, stop: threading.Event,
                 deadline: float) -> int:
@@ -257,7 +413,23 @@ class DiscordPresence:
         # know shows *no* image at all rather than falling back, so per-title
         # posters are only used once we've confirmed they exist.
         self._assets: set[str] | None = None
+        self._assets_at = 0.0           # when the list we have was read
         self._assets_retry_at = 0.0
+        # Kept on the object rather than read straight from the module so a
+        # test can turn them down and watch a refresh happen.
+        self.asset_ttl = _ASSET_TTL
+        self.asset_retry = _ASSET_RETRY
+        # Sending a picture URL down this pipe is not something Discord
+        # documents — the documented example goes through its embedded SDK —
+        # so if it ever answers that it could not use one, URLs are given up
+        # for the life of this object and the card falls back to uploaded art.
+        # _url_nonce is the SET_ACTIVITY we are waiting to hear about.
+        self._url_art = True
+        self._url_nonce = ""
+        # Which pipes to look for Discord on. None means the real
+        # discord-ipc-0..9; a test points this at a pipe of its own so nothing
+        # can reach the owner's running Discord.
+        self.pipe_paths: list[str] | None = None
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -309,16 +481,20 @@ class DiscordPresence:
         Discord publishes an application's asset list without authentication,
         so this needs no token and no permission from the user's account.
 
-        Only a list that was actually read is kept. A failed request is tried
-        again after _ASSET_RETRY: remembering the failure meant one update
-        sent before the network was up (Mistery started at login, or just
-        after resume) turned per-title art off until the next restart.
+        The list is re-read every asset_ttl (ten minutes — see the constant),
+        not kept for good: uploading a poster and then finding Mistery still
+        showing the plain icon until the next restart was the whole reason the
+        export felt like a chore. A read that fails leaves the last good list
+        in place rather than blanking the card, and is not tried again for
+        asset_retry, so a Discord that is down or an internet connection that
+        isn't up yet costs one request every ten minutes and never spins.
         """
-        if self._assets is not None:
+        now = time.monotonic()
+        if self._assets is not None and now - self._assets_at < self.asset_ttl:
             return self._assets
-        if not self.enabled or time.monotonic() < self._assets_retry_at:
-            return None
-        self._assets_retry_at = time.monotonic() + _ASSET_RETRY
+        if not self.enabled or now < self._assets_retry_at:
+            return self._assets         # stale art beats no art
+        self._assets_retry_at = now + self.asset_retry
         try:
             import requests
 
@@ -329,46 +505,91 @@ class DiscordPresence:
             )
             if response.status_code != 200:
                 _log.info("could not list Discord art (HTTP %s)", response.status_code)
-                return None
+                return self._assets
+            listed = response.json()
+            if not isinstance(listed, list):
+                _log.info("Discord answered the art list with %s", type(listed).__name__)
+                return self._assets
+            # Kept exactly as Discord spells them. This was the third place
+            # that flattened a picture value, and the one that was hardest to
+            # see: the name sent back has to be the name Discord holds, so
+            # flattening the list here meant asking for a name that might not
+            # be the one it has. _asset_match does the comparison without case
+            # instead, which is where ignoring case belongs.
             self._assets = {
-                str(entry.get("name", "")).lower()
-                for entry in response.json()
-                if entry.get("name")
+                str(entry.get("name") or "")
+                for entry in listed
+                if isinstance(entry, dict) and entry.get("name")
             }
+            self._assets_at = now
+            # The retry wait is for a read that failed. It is armed before the
+            # request so that one which throws is covered too, and disarmed
+            # here, so a read that worked is governed by asset_ttl alone. It
+            # made no difference while the two numbers were both ten minutes,
+            # but it meant turning asset_ttl down after the first read — the
+            # only way to watch a refresh happen — bought nothing: the good
+            # read had already booked the next ten minutes.
+            self._assets_retry_at = now
             _log.info("Discord application has %d image(s)", len(self._assets))
         except Exception as exc:                # never disturb playback
             _log.info("could not list Discord art: %s", exc)
-            return None
         return self._assets
 
     def _resolve_art(self, payload: dict) -> dict:
-        """Downgrade a per-title key to the app icon unless it really exists.
+        """Settle what picture the card carries. Three rungs, in this order:
 
-        Works on a copy. The update is kept after it's sent, to be sent again
-        if Discord restarts, and it must still carry the per-title key then:
-        by that time the art list may have become readable.
+          1. a public https URL, sent exactly as given. Discord's media proxy
+             fetches the picture itself, so artwork that already lives at a
+             public address needs nothing uploaded anywhere.
+          2. otherwise the name of an image the application really has. An
+             asset name Discord doesn't know shows *no* picture at all rather
+             than falling back, so a name is only sent once it is confirmed.
+             This is still the only rung art Mistery composed out of a film's
+             own frames can reach: that art has no public address.
+          3. otherwise "mistery", the icon Settings tells you to upload.
+
+        Works on a copy and changes nothing about this object: the worker
+        re-runs it on the activity already showing to notice new art, so it
+        has to be safe to call over and over. The update is kept after it is
+        sent, to be sent again if Discord restarts, and it must still carry
+        the original value then — by that time the art list may have become
+        readable, or a URL may have started working.
         """
         activity = (payload.get("args") or {}).get("activity")
         if not isinstance(activity, dict):
             return payload
-        key = (activity.get("assets") or {}).get("large_image")
-        if not key or key == "mistery":
+        # As a string whatever it is: this runs on the worker, and a type error
+        # here would end the thread and take presence with it until restart.
+        value = str((activity.get("assets") or {}).get("large_image") or "")
+        if not value or value == "mistery":
             return payload
         payload = copy.deepcopy(payload)
         assets = payload["args"]["activity"]["assets"]
+
+        # Rung 1.
+        url = public_image_url(value) if self._url_art else ""
+        if url:
+            assets["large_image"] = url
+            return payload
+
+        # Rung 2. A value that is not a URL we can send and not shaped like an
+        # asset name — a rejected URL, most often — leaves nothing to ask for,
+        # so fall back on the name derived from the text on the card. Both
+        # callers build that text from the same title the name comes from.
+        text = str(assets.get("large_text") or "")
+        key = value if _KEY_SHAPE.match(value) else asset_key(text)
         known = self.known_assets()
-        # Unknown list means we could not check — fall back to the icon we know
-        # is configured rather than gamble on a blank card.
         if known is None:
+            # Could not check — show the icon we know is configured rather
+            # than gamble on a blank card.
             assets["large_image"] = "mistery"
-        elif key not in known:
-            # Both callers derive the key from the text shown on the image
-            # (the film, show or album), so the old spelling of that same
-            # title can still be found among art uploaded before long names
-            # carried a hash.
-            text = str(assets.get("large_text") or "")
+        else:
+            # Art uploaded before long names carried a hash is still found
+            # under the old spelling of the same title.
             legacy = _legacy_asset_key(text) if asset_key(text) == key else ""
-            assets["large_image"] = legacy if legacy and legacy in known else "mistery"
+            assets["large_image"] = (_asset_match(key, known)
+                                     or _asset_match(legacy, known)
+                                     or "mistery")
         return payload
 
     def set_watching(
@@ -378,9 +599,13 @@ class DiscordPresence:
         remaining: float | None = None,
         paused: bool = False,
         image_text: str = "",
-        image_key: str = "",
+        image: str = "",
     ) -> None:
-        """Show a title. `remaining` drives Discord's countdown."""
+        """Show a title. `remaining` drives Discord's countdown.
+
+        `image` is a public https URL or the name of an uploaded image;
+        _resolve_art picks between them and falls back to the icon.
+        """
         if not self.enabled:
             return
         activity: dict = {
@@ -395,7 +620,11 @@ class DiscordPresence:
         if remaining and remaining > 0 and not paused:
             activity["timestamps"] = {"end": int(time.time() + remaining)}
         activity["assets"] = {
-            "large_image": (image_key or "").lower() or "mistery",
+            # Passed on as written. This used to be lowercased, which is fine
+            # for an asset name (asset_key builds those lowercase anyway) but
+            # destroys a URL: TMDB and Wikimedia paths are case-sensitive, so
+            # a flattened one fetches nothing at all.
+            "large_image": (image or "").strip() or "mistery",
             "large_text": (image_text or "Mistery")[:128],
         }
         self._send({
@@ -411,9 +640,14 @@ class DiscordPresence:
         album: str = "",
         remaining: float | None = None,
         paused: bool = False,
-        image_key: str = "",
+        image: str = "",
     ) -> None:
-        """'Listening to' — Discord's type 2, shown with the song and a countdown."""
+        """'Listening to' — Discord's type 2, shown with the song and a countdown.
+
+        `image` is an uploaded image's name today; it goes through the same
+        ladder as a film's, so a URL would work here too when something starts
+        passing one.
+        """
         if not self.enabled:
             return
         activity: dict = {"type": 2, "details": (title or "Music")[:128]}
@@ -425,7 +659,8 @@ class DiscordPresence:
         if remaining and remaining > 0 and not paused:
             activity["timestamps"] = {"end": int(time.time() + remaining)}
         activity["assets"] = {
-            "large_image": (image_key or "").lower() or "mistery",
+            # Written through unchanged, for the reason in set_watching.
+            "large_image": (image or "").strip() or "mistery",
             "large_text": (album or "Mistery")[:128],
         }
         self._send({
@@ -464,6 +699,7 @@ class DiscordPresence:
     def _loop(self, run: _Run) -> None:
         latest: dict | None = None      # waiting to be sent
         shown: dict | None = None       # the activity Discord last accepted
+        shown_image = ""                # the picture that went with it
         pipe: _Pipe | None = None
         try:
             while not run.stop.is_set():
@@ -486,6 +722,16 @@ class DiscordPresence:
                     if latest is None and shown is not None:
                         latest = dict(shown, nonce=str(uuid.uuid4()))
 
+                if latest is None and shown is not None and pipe is not None:
+                    # Nothing new to say, so check whether what is already on
+                    # the profile would resolve to a different picture now:
+                    # a poster uploaded during the film (known_assets re-reads
+                    # every ten minutes), an art list that has become readable,
+                    # or a URL Discord has just told us it could not use. Only
+                    # a real change puts a frame on the pipe.
+                    if _image_of(self._resolve_art(shown)) != shown_image:
+                        latest = dict(shown, nonce=str(uuid.uuid4()))
+
                 if latest is None or run.stop.is_set():
                     continue
                 if pipe is None:
@@ -497,6 +743,12 @@ class DiscordPresence:
                 frame = self._resolve_art(latest)
                 if run.stop.is_set():
                     break
+                image = _image_of(frame)
+                # Which SET_ACTIVITY to listen for an error about. Only a frame
+                # carrying a URL is worth watching: that is the part Discord
+                # has never documented for this transport.
+                self._url_nonce = (str(frame.get("nonce") or "")
+                                   if image[:8].lower() == "https://" else "")
                 try:
                     self._write(pipe, OP_FRAME, frame, run)
                 except OSError:
@@ -507,6 +759,7 @@ class DiscordPresence:
                 # A cleared activity needs nothing sent after a restart.
                 has_activity = (latest.get("args") or {}).get("activity") is not None
                 shown, latest = (latest if has_activity else None), None
+                shown_image = image if has_activity else ""
         finally:
             run.connected = False
             if pipe is not None:
@@ -540,17 +793,57 @@ class DiscordPresence:
     def _still_open(self, pipe: _Pipe, run: _Run) -> bool:
         """False once Discord has closed its end. Reads what it sent meanwhile.
 
-        Discord answers every SET_ACTIVITY. Nothing here needs the answers,
-        but left unread they fill the pipe's buffer.
+        Discord answers every SET_ACTIVITY, and left unread the answers fill
+        the pipe's buffer. One of them is worth reading: see _read_replies.
         """
         try:
             waiting = pipe.waiting()
             if waiting:
-                pipe.read(min(waiting, 65536), run.stop,
-                          time.monotonic() + _REPLY_TIMEOUT)
+                pipe.spare += pipe.read(min(waiting, 65536), run.stop,
+                                        time.monotonic() + _REPLY_TIMEOUT)
+                pipe.spare = self._read_replies(pipe.spare)
             return True
         except OSError:
             return False
+
+    def _read_replies(self, buffer: bytes) -> bytes:
+        """Take whole reply frames off the buffer; return the unfinished tail.
+
+        Only one answer changes anything: an ERROR against the SET_ACTIVITY
+        that carried a picture URL. Putting a URL in the activity is
+        documented, but not over this pipe — the documented example goes
+        through Discord's embedded SDK — so if it ever comes back refused,
+        URLs are given up and _resolve_art drops to uploaded art instead of
+        leaving the card blank. Matched on the nonce, so an error about some
+        other frame is not mistaken for this one.
+
+        Discord accepting the activity is no proof the picture drew, of
+        course; nothing on this pipe can tell us that. The export button is
+        still there for a title that never comes out right.
+        """
+        while len(buffer) >= 8:
+            opcode, length = struct.unpack("<II", buffer[:8])
+            if length > 1 << 20:
+                return b""              # not Discord talking; drop the lot
+            if len(buffer) < 8 + length:
+                return buffer           # the rest is still on its way
+            body, buffer = buffer[8:8 + length], buffer[8 + length:]
+            if opcode != OP_FRAME or not self._url_nonce:
+                continue
+            try:
+                reply = json.loads(body.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if (isinstance(reply, dict) and reply.get("evt") == "ERROR"
+                    and reply.get("nonce") == self._url_nonce):
+                self._url_art = False
+                self._url_nonce = ""
+                _log.warning(
+                    "Discord would not take a picture URL (%s); using uploaded "
+                    "art from now on",
+                    (reply.get("data") or {}).get("message") or "no reason given",
+                )
+        return buffer
 
     def _connect(self, run: _Run) -> _Pipe | None:
         now = time.monotonic()
@@ -558,8 +851,10 @@ class DiscordPresence:
             return None
         self._next_attempt = now + _RECONNECT_DELAY
 
-        for index in range(_MAX_PIPES):
-            path = _pipe_path(index)
+        paths = self.pipe_paths
+        if paths is None:
+            paths = [_pipe_path(index) for index in range(_MAX_PIPES)]
+        for path in paths:
             try:
                 pipe = _Pipe(path)
             except OSError:

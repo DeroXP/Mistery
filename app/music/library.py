@@ -16,6 +16,7 @@ import os
 import re
 import sqlite3
 import time
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -553,24 +554,85 @@ def album_tracks(album_id: int) -> list:
     )
 
 
-def artists() -> list:
-    return db.query(
+def artist_key(name: str | None) -> str:
+    """Which artist a name means, whatever the tags' capitals and punctuation.
+
+    "Bring Me The Horizon" and "Bring Me the Horizon" are one band, and so are
+    "KoRn" and "Korn": albums tagged by different people spell the same band
+    differently. Albums were already matched this way (album_key), but artists
+    were grouped by exact spelling, so the owner's Artists page showed both
+    bands twice, each with some of their albums.
+
+    Only case, spacing and punctuation are dropped. Letters and digits of every
+    script stay — album_key's a-z would turn a name written in Japanese into
+    nothing, and every such artist into one — and a name that is nothing but
+    punctuation ("!!!") keeps it rather than matching every other such name.
+    """
+    text = unicodedata.normalize("NFKC", name or "").casefold()
+    return re.sub(r"[\W_]+", "", text) or text.strip()
+
+
+def artists() -> list[dict]:
+    """One row per artist, however many ways their name was spelled.
+
+    The name shown is the spelling most of their songs carry; the cover is
+    their earliest album's, as before. Grouped here rather than in SQL because
+    SQLite has no way to fold "KoRn" into "Korn" — and a library is a few
+    hundred albums, which Python groups in about a millisecond.
+    """
+    rows = db.query(
         """
-        SELECT a.artist AS name, a.sort_artist AS sort_name,
-               COUNT(DISTINCT a.id) AS album_count,
-               SUM(t.state = 'ready') AS track_count,
-               (SELECT a2.cover FROM albums a2 WHERE a2.artist = a.artist AND a2.cover IS NOT NULL
-                  AND EXISTS (SELECT 1 FROM tracks t2 WHERE t2.album_id = a2.id AND t2.missing = 0)
-                ORDER BY a2.year LIMIT 1) AS cover
+        SELECT a.id, a.artist, a.year, a.cover, SUM(t.state = 'ready') AS track_count
         FROM albums a JOIN tracks t ON t.album_id = a.id AND t.missing = 0
-        GROUP BY a.artist ORDER BY a.sort_artist
+        GROUP BY a.id
         """
     )
+    groups: dict[str, dict] = {}
+    for row in rows:
+        group = groups.setdefault(artist_key(row["artist"]), {
+            "spellings": Counter(), "album_count": 0, "track_count": 0, "covers": []})
+        # Every album counts at least once, so a spelling whose songs are all
+        # still downloading is not outvoted to nothing.
+        group["spellings"][row["artist"]] += max(1, int(row["track_count"] or 0))
+        group["album_count"] += 1
+        group["track_count"] += int(row["track_count"] or 0)
+        if row["cover"]:
+            group["covers"].append((row["year"] or 9999, row["cover"]))
+    result = []
+    for group in groups.values():
+        # Most songs wins; a tie goes to whichever sorts first, so the name on
+        # a tile does not change from one start to the next.
+        name = min(group["spellings"], key=lambda spelling: (-group["spellings"][spelling], spelling))
+        result.append({
+            "name": name,
+            "sort_name": sort_key(name),
+            "album_count": group["album_count"],
+            "track_count": group["track_count"],
+            "cover": min(group["covers"])[1] if group["covers"] else None,
+            "spellings": sorted(group["spellings"]),
+        })
+    result.sort(key=lambda artist: (artist["sort_name"], artist["name"]))
+    return result
+
+
+def artist_name(name: str) -> str:
+    """The spelling the Artists page shows for this artist, from any spelling.
+
+    So a song tagged "Bring Me the Horizon" opens the page titled the way its
+    tile is, rather than a page with the same albums under the other spelling.
+    """
+    wanted = artist_key(name)
+    for artist in artists():
+        if artist_key(artist["name"]) == wanted:
+            return artist["name"]
+    return name
 
 
 def artist_albums(name: str) -> list:
-    return db.query(_ALBUM_SELECT + " WHERE a.artist = ? GROUP BY a.id ORDER BY a.year, a.sort_title",
-                    (name,))
+    """Every album by this artist, under any spelling of their name."""
+    wanted = artist_key(name)
+    return [row for row in db.query(_ALBUM_SELECT + " GROUP BY a.id ORDER BY a.year, a.sort_title")
+            if artist_key(row["artist"]) == wanted]
 
 
 def tracks(where: str = "", params: tuple = (), order: str = "") -> list:

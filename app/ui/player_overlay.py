@@ -1146,6 +1146,14 @@ class PlayerOverlay(QWidget):
             menu.addSeparator()
             menu.addAction("End movie night", self.party_leave_requested.emit)
         else:
+            # A guest has a code to pass on only in a movie night on a friend's
+            # PC, which the one who started it hands to that friend's friends.
+            if info.get("code"):
+                menu.addAction("Copy invite code", lambda: self._copy(info["code"], "Invite code copied"))
+            if info.get("link"):
+                menu.addAction("Copy invite link", lambda: self._copy(info["link"], "Invite link copied"))
+            if info.get("code") or info.get("link"):
+                menu.addSeparator()
             menu.addAction("Leave movie night", self.party_leave_requested.emit)
         return menu
 

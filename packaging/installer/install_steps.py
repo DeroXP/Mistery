@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import arp, fetch, payload, task
+from . import arp, fetch, payload, sharing, task
 from .setup_common import (APP_EXE_NAME, APP_ID, APP_NAME, CREATE_NO_WINDOW,
                            MARKER_NAME, PUBLISHER, RUNTIME_DIR_NAME,
                            UNINSTALLER_NAME, UPDATER_NAME, UPDATE_DIR_NAME,
@@ -273,15 +273,21 @@ def run(options: Options, report: Report, cancel=None) -> Result:
     while deleting it would take their working copy with it.
     """
     existed_before = Path(options.install_dir).exists()
+    paused: list[bool] = []
     try:
-        return _run(options, report, cancel)
+        return _run(options, report, cancel, paused)
     except Cancelled:
         if not existed_before:
             shutil.rmtree(options.install_dir, ignore_errors=True)
         raise
+    finally:
+        # Whatever happened after it stepped aside, friends are served again:
+        # from the new files, or from the old ones a failed upgrade left.
+        if paused:
+            sharing.start_sharer(Path(options.install_dir))
 
 
-def _run(options: Options, report: Report, cancel=None) -> Result:
+def _run(options: Options, report: Report, cancel=None, paused: list[bool] | None = None) -> Result:
     started = time.monotonic()
     folder = Path(options.install_dir)
     result = Result(install_dir=folder)
@@ -290,6 +296,18 @@ def _run(options: Options, report: Report, cancel=None) -> Result:
     existing = check_target(folder)
     if existing:
         result.notes.append(existing)
+        # The Mistery serving friends with no window runs this folder's
+        # Mistery.exe and never quits by itself. It steps aside for the files
+        # to be replaced, as it does for the updater, and run() starts it again.
+        if sharing.sharer_pid(folder) is not None:
+            report("Pausing sharing with friends", 0.0)
+            stopped = sharing.stop_sharer(folder)
+            if stopped is False:
+                raise InstallError(sharing.STOP_FAILED)
+            if stopped and paused is not None:
+                paused.append(True)
+                result.notes.append("sharing with friends paused for the install, "
+                                    "and started again after it")
         # Only when there is something here to overwrite. A Mistery running out
         # of some other folder is not this install's business, and refusing over
         # it would make a second copy impossible to install.

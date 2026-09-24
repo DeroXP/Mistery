@@ -292,6 +292,23 @@ footer a { color: var(--dim); }
 footer a:hover { color: var(--text); }
 .quiet { color: var(--faint); }
 
+/* --- /add and /join: a friend's code, a movie night's invite --------------- */
+
+.link-page { grid-template-columns: minmax(0, 1fr); }
+.link-page h1 { max-width: 22ch; text-wrap: balance; }
+.link-fallback { color: var(--dim); margin: 18px 0 8px; max-width: 60ch; }
+.link-fallback b { color: var(--text); font-weight: 600; }
+.link-code { margin: 0; }
+/* The script puts a <wbr> after each dash, so a narrow screen wraps the code
+   between groups rather than inside one; copying it still gives just the code. */
+.link-code code {
+  display: inline-block;
+  font-size: 1.05rem;
+  letter-spacing: 0.04em;
+  padding: 10px 14px;
+}
+[hidden] { display: none !important; }
+
 /* --- phone --------------------------------------------------------------- */
 
 @media (max-width: 720px) {

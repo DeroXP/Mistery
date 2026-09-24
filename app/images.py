@@ -232,6 +232,48 @@ def cover_pixmap(
     return target
 
 
+def framed_pixmap(
+    image: QImage,
+    width: int,
+    height: int,
+    radius: int = 10,
+    device_ratio: float = 1.0,
+) -> QPixmap:
+    """A tall picture in a wide frame, whole: over a soft, darkened copy of
+    itself that fills the frame. Cropping a poster to 16:9 keeps its middle
+    third, which is usually neither the faces nor the title.
+
+    Anything already about as wide as the frame is cropped to fill it, as
+    cover_pixmap does.
+    """
+    if image.isNull() or image.width() / image.height() > 0.8 * width / height:
+        return cover_pixmap(image, width, height, radius, device_ratio)
+    target = QPixmap(int(width * device_ratio), int(height * device_ratio))
+    target.setDevicePixelRatio(device_ratio)
+    target.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(target)
+    painter.setRenderHints(
+        QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
+    )
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(0, 0, width, height), radius, radius)
+    painter.setClipPath(path)
+    # The blur is a copy shrunk to a few dozen pixels and drawn back up
+    # smoothly: soft enough, and costs nothing next to reading the file.
+    small = image.scaled(24, 36, Qt.AspectRatioMode.IgnoreAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    scale = max(width / small.width(), height / small.height())
+    painter.drawImage(QRectF((width - small.width() * scale) / 2,
+                             (height - small.height() * scale) / 2,
+                             small.width() * scale, small.height() * scale), small)
+    painter.fillRect(QRectF(0, 0, width, height), QColor(0, 0, 0, 120))
+    fit = height / image.height()
+    shown_w = image.width() * fit
+    painter.drawImage(QRectF((width - shown_w) / 2, 0, shown_w, height), image)
+    painter.end()
+    return target
+
+
 def _hue_for(text: str) -> int:
     digest = hashlib.md5((text or "?").encode("utf-8")).hexdigest()
     return int(digest[:4], 16) % 360
@@ -296,11 +338,16 @@ def art_pixmap(
     radius: int,
     device_ratio: float,
     on_ready: Callable[[QPixmap], None],
+    framed: bool = False,
 ) -> QPixmap:
     """Return artwork immediately if cached, otherwise a placeholder now and
-    the real image via `on_ready` once it has been read from disk."""
+    the real image via `on_ready` once it has been read from disk. `framed`
+    shows a tall picture whole in a wide space (framed_pixmap) instead of
+    cropping it."""
     if path:
         key = (path, width, height, radius, device_ratio)
+        if framed:
+            key += ("framed",)          # every other picture's key as it always was
         cached = _cache_get(key)
         if cached is not None:
             return cached
@@ -308,7 +355,8 @@ def art_pixmap(
         def _finish(image: QImage) -> None:
             if image.isNull():
                 return
-            pixmap = cover_pixmap(image, width, height, radius, device_ratio)
+            make = framed_pixmap if framed else cover_pixmap
+            pixmap = make(image, width, height, radius, device_ratio)
             _cache_put(key, pixmap)
             on_ready(pixmap)
 

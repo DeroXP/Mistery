@@ -418,8 +418,12 @@ def test_service_with_release() -> None:
         check("GET / is 200", home.status_code == 200, str(home.status_code))
         check("the page names the version from the manifest", "Download Mistery 1.1.0" in home.text)
         check("the page shows the installer's real size", "8.4 MB" in home.text)
-        check("the page does not claim Mistery finds or streams anything",
-              "does not find, stream" in home.text)
+        # Friends play from each other's libraries now, so "does not stream"
+        # stopped being true; what stays true is that it never fetches media.
+        check("the page says Mistery does not find, buy or download media",
+              "does not find, buy or download films or music" in " ".join(home.text.split()))
+        check("and says the one thing it does stream: a friend's, from their PC",
+              "your friends' straight from their PCs" in " ".join(home.text.split()))
         # The SmartScreen box is the most likely reason a download never
         # becomes an install, and for a while this page was the only one of
         # the three that said nothing about it. Four checks, because each
@@ -807,6 +811,46 @@ def test_missing_configuration() -> None:
     check("and says the key is unusable", "unusable" in output, output[-400:])
 
 
+def test_link_pages() -> None:
+    """/add and /join: what Mistery's "Copy link" points at. The code rides
+    after the #, which never reaches the server, so the page reads it with the
+    site's one script, allowed on these pages alone and only by its hash."""
+    import hashlib
+    import re
+
+    print("\nthe link pages (/add, /join)")
+    envelope, public = make_manifest()
+    environment = {
+        "MISTERY_UPDATE_PUBLIC_KEY": base64.b64encode(public).decode(),
+        "MISTERY_MANIFEST_JSON": envelope.decode(),
+        "MISTERY_SITE_URL": "https://mistery.example",
+    }
+    with Server(environment):
+        for kind, words in (("add", "Add theirs"), ("join", "Movie night")):
+            answer = httpx.get(f"{BASE}/{kind}", timeout=10)
+            check(f"GET /{kind} is 200", answer.status_code == 200, str(answer.status_code))
+            check(f"/{kind} says where the code goes in Mistery", words in answer.text)
+            check(f"/{kind} opens Mistery with a mistery://{kind}/ link",
+                  f'"mistery://"+kind+"/"+code' in answer.text and f'data-kind="{kind}"' in answer.text)
+            scripts = re.findall(r"<script>(.*?)</script>", answer.text, re.S)
+            policy = answer.headers.get("content-security-policy", "")
+            digest = (base64.b64encode(hashlib.sha256(scripts[0].encode("utf-8")).digest()).decode()
+                      if len(scripts) == 1 else "")
+            check(f"/{kind}: one script, and the policy allows exactly it, by its hash",
+                  len(scripts) == 1 and f"script-src 'sha256-{digest}'" in policy
+                  and "unsafe-inline" not in policy, policy)
+            check(f"/{kind}: the rest of the policy is the site's own",
+                  policy.startswith("default-src 'none'") and "form-action 'none'" in policy)
+            check(f"/{kind}: without the script, it still says what to do",
+                  'id="noscript"' in answer.text and "after the <b>#</b>" in answer.text)
+            check(f"/{kind}: no cookie", "set-cookie" not in answer.headers)
+            check(f"HEAD /{kind} is 200", httpx.head(f"{BASE}/{kind}").status_code == 200)
+        home = httpx.get(f"{BASE}/", timeout=10)
+        check("CONTROL: the front page still runs no script, and allows none",
+              "<script" not in home.text.lower()
+              and "script-src" not in home.headers.get("content-security-policy", ""))
+
+
 def main() -> int:
     print(f"testing the Mistery site on port {PORT}, python {sys.version.split()[0]}")
     test_signing()
@@ -814,6 +858,7 @@ def main() -> int:
     test_store()
     test_slow_source()
     test_service_with_release()
+    test_link_pages()
     test_service_without_release()
     test_screenshots()
     test_service_with_forged_manifest()

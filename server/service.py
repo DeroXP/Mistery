@@ -60,9 +60,10 @@ log = logging.getLogger("mistery.site")
 # Headers on every single response. Each one is here for a reason:
 #
 #  - Content-Security-Policy: `default-src 'none'` and then only what the page
-#    truly uses. The page has no JavaScript at all, so `script-src 'none'` costs
+#    truly uses. The page has no JavaScript at all, so no script-src costs
 #    nothing and means an injected <script> cannot run even if some future
-#    version of this file forgets to escape something. `style-src 'self'` with
+#    version of this file forgets to escape something. (/add and /join run one
+#    script, and their policy names it by its hash - _link_page.) `style-src 'self'` with
 #    no 'unsafe-inline' is why the stylesheet is a separate file. form-action
 #    'none' because there is no form on this site and never should be;
 #    frame-ancestors 'none' so nobody can frame the download button inside
@@ -398,6 +399,30 @@ async def landing(request: Request) -> Response:
             # Short, and revalidated: a release cut five minutes ago should show
             # up on the page within five minutes, not when a CDN feels like it.
             "Cache-Control": "public, max-age=300, must-revalidate",
+        },
+    )
+
+
+@app.api_route("/add", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def add_friend() -> Response:
+    """Where Mistery's "Copy link" for a friend code points: page.render_link."""
+    return _link_page("add")
+
+
+@app.api_route("/join", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def join_movie_night() -> Response:
+    """The same for a movie night's invite."""
+    return _link_page("join")
+
+
+def _link_page(kind: str) -> Response:
+    # The one policy on this site that lets a script run: LINK_SCRIPT, by its
+    # hash, and nothing else. The middleware's setdefault leaves it in place.
+    return HTMLResponse(
+        page.render_link(kind, state.config),
+        headers={
+            "Content-Security-Policy": page.link_csp(SECURITY_HEADERS["Content-Security-Policy"]),
+            "Cache-Control": "public, max-age=3600",
         },
     )
 

@@ -19,7 +19,7 @@ from pathlib import Path
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -202,8 +202,51 @@ def _release_instance() -> None:
         _instance_mutex = None
 
 
-def _wake_running_instance() -> bool | None:
-    """Ask an already-running Mistery to show itself.
+LINK_SCHEME = "mistery://"
+MAX_LINK = 512                  # an invite link is about 90 characters
+
+
+def _link_from(argv: list[str]) -> str | None:
+    """A mistery:// link Windows started this with (a click on one), or None."""
+    for arg in argv[1:]:
+        if isinstance(arg, str) and arg[:len(LINK_SCHEME)].lower() == LINK_SCHEME \
+                and len(arg) <= MAX_LINK and arg.isprintable():
+            return arg
+    return None
+
+
+def _register_links() -> None:
+    """Make mistery:// links open this Mistery: HKEY_CURRENT_USER, this user only.
+
+    Done by the app, at every start, rather than once by the installer: a copy
+    that updated itself never runs the installer again, and one that moved
+    folders needs the entry to follow. Only an installed Mistery.exe does it:
+    from source, or with a throwaway data folder (a test), the owner's
+    registry is left alone.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False) or os.environ.get("MISTERY_DATA_DIR"):
+        return
+    import winreg
+
+    exe = str(Path(sys.executable).resolve())
+    command = f'"{exe}" "%1"'
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\mistery") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:Mistery")
+            winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                              r"Software\Classes\mistery\DefaultIcon") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{exe},0")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                              r"Software\Classes\mistery\shell\open\command") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
+    except OSError as exc:
+        logging.getLogger("startup").warning("could not register mistery:// links: %s", exc)
+
+
+def _wake_running_instance(link: str | None = None) -> bool | None:
+    """Ask an already-running Mistery to show itself, and to open `link` if a
+    mistery:// link started this launch.
 
     True if it answered, False if nothing is listening, None if something took
     the request and never answered.
@@ -223,7 +266,7 @@ def _wake_running_instance() -> bool | None:
     socket.connectToServer(_instance_channel())
     if not socket.waitForConnected(700):
         return False
-    socket.write(b"show\n")
+    socket.write(b"open " + link.encode("utf-8") + b"\n" if link else b"show\n")
     socket.flush()
     socket.waitForBytesWritten(700)
     answered = socket.waitForReadyRead(2000) and socket.readLine().data().startswith(b"ok")
@@ -242,11 +285,20 @@ def _listen_for_other_instances(window) -> None:
 
     def on_connection() -> None:
         connection = server.nextPendingConnection()
+        line = b""
         if connection is not None:
             connection.disconnected.connect(connection.deleteLater)
+            # "show", or "open <mistery:// link>": written straight after
+            # connecting, so it is there or nearly there.
+            if connection.canReadLine() or connection.waitForReadyRead(300):
+                line = bytes(connection.readLine(MAX_LINK + 8).data())
             connection.write(b"ok\n")
             connection.flush()
         window.show_from_tray()
+        if line.startswith(b"open "):
+            link = _link_from(["", line[5:].decode("utf-8", "replace").strip()])
+            if link:
+                window.open_link(link)
 
     server.newConnection.connect(on_connection)
 
@@ -420,6 +472,34 @@ def main() -> int:
     from app.log import setup as setup_logging
 
     setup_logging(verbose="--verbose" in sys.argv)
+
+    if "--share" in sys.argv:
+        # Serving friends with no window (app/share/sharer.py). The same
+        # program as the app on purpose: Windows Firewall asks about a program
+        # once, and a second one would ask again with nobody at the screen.
+        # No QApplication, no library scan, no window — a socket and a sleep.
+        # One at a time (background.claim), and it leaves when the updater asks.
+        from app import db
+        from app.share import background
+        from app.share.sharer import run_background
+
+        log = logging.getLogger("share")
+        claim = background.claim()
+        if claim is None:
+            log.info("already serving friends in the background; this one is not needed")
+            return 0
+        try:
+            db.init()
+            log.info("started to serve friends, without a window")
+            # Loopback only for a test's throwaway data folder, where listening
+            # on every interface would make Windows Firewall ask the owner.
+            loopback = bool(os.environ.get("MISTERY_DATA_DIR")) and \
+                os.environ.get("MISTERY_SHARE_LOOPBACK") == "1"
+            return run_background(stop=claim.stop_requested,
+                                  bind="127.0.0.1" if loopback else "0.0.0.0")
+        finally:
+            claim.release()
+
     # Installed, Mistery is a folder of DLLs with no source to read, so this log
     # is the only way to answer the two questions a bad install raises: which
     # mpv did it pick (PATH first, then runtime\ beside the exe), and did the
@@ -449,8 +529,11 @@ def main() -> int:
     # over the named pipe first, before the database is even opened: the lock
     # file is invisible across an AppData virtualization boundary (see below),
     # the pipe is not.
+    # A mistery:// link clicked on the website or in a chat (registered by
+    # _register_links): the Mistery already open takes it, or this one does.
+    link = _link_from(sys.argv)
     first = _claim_instance()
-    woke = _wake_running_instance()
+    woke = _wake_running_instance(link)
     # Another launch holds the name but may still be starting: it listens
     # only once its window is up, which can take a while right after boot.
     deadline = time.monotonic() + 20
@@ -458,7 +541,7 @@ def main() -> int:
         time.sleep(0.25)
         first = _claim_instance()           # it quit before getting that far
         if not first:
-            woke = _wake_running_instance()
+            woke = _wake_running_instance(link)
     if woke:
         return 0
     from app.config import app_is_running, virtualized_appdata
@@ -512,6 +595,9 @@ def main() -> int:
     app.aboutToQuit.connect(_note_quit)
     app.aboutToQuit.connect(_clear_lock)
     _listen_for_other_instances(window)
+    _register_links()
+    if link:
+        QTimer.singleShot(0, lambda: window.open_link(link))
     # Windows signing out or shutting down must never meet a close that goes to
     # the tray instead — that is what "this app is preventing shutdown" is. Only
     # the flag, not a quit: Windows can still cancel the shutdown after asking.

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 import logging
+import threading
 import time
 
 from .. import db, images, vr
@@ -22,12 +23,15 @@ from ..music import lyrics as music_lyrics
 from ..music.player import MusicPlayer
 from .album_view import AlbumView, ArtistView
 from .detail_view import DetailView
+from .friend_library_view import FriendLibraryView, friend_item, friend_items
+from .friends_view import FriendsView
 from .home_view import HomeView
 from .library_view import LibraryView
 from .music_view import MusicView
 from .playlists_view import PlaylistsView
 from .now_playing import NowPlayingBar, NowPlayingView
-from .party_dialog import HostDialog, JoinDialog, MovieNightButton, ask_to_end
+from .party_dialog import (HostDialog, JoinDialog, MovieNightButton, ask_to_end,
+                           ask_to_end_friends_night)
 from .player_view import PlayerView
 from .settings_view import SettingsView
 from .show_view import ShowView
@@ -42,6 +46,7 @@ _NAV = [
     ("tv", "Shows"),
     ("music", "Music"),
     ("queue", "Playlists"),
+    ("people", "Friends"),
     ("search", "Search"),
     ("settings", "Settings"),
 ]
@@ -49,6 +54,7 @@ _NAV_SEARCH = next(i for i, (name, _) in enumerate(_NAV) if name == "search")
 _NAV_SETTINGS = next(i for i, (name, _) in enumerate(_NAV) if name == "settings")
 _NAV_MUSIC = next(i for i, (name, _) in enumerate(_NAV) if name == "music")
 _NAV_PLAYLISTS = next(i for i, (name, _) in enumerate(_NAV) if name == "queue")
+_NAV_FRIENDS = next(i for i, (name, _) in enumerate(_NAV) if name == "people")
 
 
 class NavButton(QPushButton):
@@ -120,6 +126,11 @@ class _StatusLine(QLabel):
 
 
 class MainWindow(QMainWindow):
+    # A friend's film asked for on a thread (play_friend): (the FriendItem, the
+    # opened stream or None, the sentence for the page when it is None).
+    _friend_opened = Signal(object, object, str)
+    _together_ready = Signal(object, str, str)      # FriendItem, its movie night's code, or why not
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Mistery")
@@ -177,6 +188,8 @@ class MainWindow(QMainWindow):
         self.player = PlayerView()
         self.music_page = MusicView(self.music)
         self.playlists_page = PlaylistsView()
+        self.friends_page = FriendsView()
+        self.friend_library = FriendLibraryView()
         self.album_page = AlbumView(self.music)
         self.artist_page = ArtistView(self.music)
         self.now_playing = NowPlayingView(self.music)
@@ -184,7 +197,7 @@ class MainWindow(QMainWindow):
         for page in (self.home, self.movies, self.shows, self.search,
                      self.detail, self.show_page, self.settings_page, self.player,
                      self.music_page, self.playlists_page, self.album_page, self.artist_page,
-                     self.now_playing):
+                     self.now_playing, self.friends_page, self.friend_library):
             self.stack.addWidget(page)
 
         # Spotify's defining piece of furniture: the player that follows you.
@@ -236,6 +249,33 @@ class MainWindow(QMainWindow):
         # decimal), and making it takes back a router forward that a crash left
         # open, which is "at the next start" either way.
         QTimer.singleShot(2000, self, self.party_session)
+        # Library sharing, when it is on: the port friends reach. Nothing at
+        # all while it is off, which is how it starts.
+        QTimer.singleShot(2500, self, self._start_sharing)
+
+    @staticmethod
+    def _start_sharing() -> None:
+        """Open library sharing's port, off Qt's thread: the import pulls in the
+        certificate code, and the port can take a few seconds to be had while
+        the Mistery serving friends without a window (--share) lets go of it."""
+        # Sharing off and no friend code waiting (pairing.PENDING_SETTING) is
+        # how nearly everyone starts: nothing to serve, so not even the import.
+        if not settings.get("sharing_enabled") and not settings.get("sharing_pending"):
+            return
+
+        def start() -> None:
+            from ..share import background, sharer as share_sharer
+
+            while not share_sharer.start_if_wanted(wait=5.0) and background.running():
+                # The Mistery with no window keeps the port while a friend's
+                # movie night on this PC is on (Sharer.stop waits for it to end,
+                # app/share/nights.py), and serves friends meanwhile: take over
+                # once it lets go, not never.
+                time.sleep(10.0)
+            # The sign-in entry, put right if it points at an older install.
+            background.sync()
+
+        threading.Thread(target=start, name="share-start", daemon=True).start()
 
     def _retry_failed_artwork(self) -> None:
         failed = images.failed_paths()
@@ -306,10 +346,14 @@ class MainWindow(QMainWindow):
         self.home.item_action.connect(self._on_card_action)
         self.home.open_media.connect(self.open_media)
         self.home.open_show.connect(self.open_show)
+        self.home.friend_play_requested.connect(self.play_friend)
+        self.home.friend_open_requested.connect(self.open_friend_item)
+        self.home.friend_together_requested.connect(self.watch_together)
         self.home.add_folder_requested.connect(self._add_folder)
         self.home.movie_nights.join_requested.connect(self.join_movie_night)
         self.home.movie_nights.continue_requested.connect(self.continue_movie_night)
         self.home.movie_nights.forget_requested.connect(self._forget_movie_night)
+        self.home.movie_nights.together_requested.connect(self.watch_together_again)
 
         for view in (self.movies, self.shows, self.search):
             view.play_requested.connect(lambda item: self.play(item))
@@ -378,6 +422,13 @@ class MainWindow(QMainWindow):
         self.album_page.artist_requested.connect(self.open_artist)
         self.artist_page.back_requested.connect(self.go_back)
         self.artist_page.album_requested.connect(self.open_album)
+        self.friends_page.open_friend.connect(self.open_friend_library)
+        self.friend_library.back_requested.connect(self.go_back)
+        self.friend_library.play_requested.connect(self.play_friend)
+        self._friend_opened.connect(self._on_friend_opened)
+        self.friend_library.together_requested.connect(self.watch_together)
+        self._together_ready.connect(self._on_together_ready)
+        self.music.queue_changed.connect(self._follow_friend_music)
         self.now_playing.back_requested.connect(self.go_back)
         self.now_playing.album_requested.connect(self.open_album)
         self.now_playing.artist_requested.connect(self.open_artist)
@@ -496,7 +547,7 @@ class MainWindow(QMainWindow):
         # Parallel to _NAV, and it has to stay that way: an entry added to one
         # list and not the other silently shifts every page after it.
         page = [self.home, self.movies, self.shows, self.music_page, self.playlists_page,
-                self.search, self.settings_page][index]
+                self.friends_page, self.search, self.settings_page][index]
         if page is self.search:
             self.search.focus_search()
         elif page is self.playlists_page:
@@ -547,6 +598,8 @@ class MainWindow(QMainWindow):
             return self.show_page._show
         if page is self.playlists_page:
             return self.playlists_page.playlist_id
+        if page is self.friend_library:
+            return self.friend_library.friend_id
         return None
 
     def go_back(self) -> None:
@@ -574,6 +627,8 @@ class MainWindow(QMainWindow):
             # album: point it back at the list this history entry was showing.
             page.show_playlist(state)
             page.reload()
+        elif page is self.friend_library and state is not None and state != page.friend_id:
+            page.set_friend(state)          # the same for every friend's library
         elif hasattr(page, "reload") and page not in (self.detail, self.show_page):
             page.reload()
 
@@ -586,6 +641,222 @@ class MainWindow(QMainWindow):
         self.show_page.set_show(show)
         self._go(self.show_page)
         self._sync_nav(None)
+
+    # --- friends' libraries -------------------------------------------------
+
+    def open_friend_library(self, friend_id: int) -> None:
+        """A friend's films, shows and music: under Friends in the top bar."""
+        self.friend_library.set_friend(friend_id)
+        self._go(self.friend_library)
+        self._sync_nav(_NAV_FRIENDS)
+
+    def open_friend_item(self, item) -> None:
+        """A friend's film or episode from Home: its page in their library, a
+        film's own or an episode's show."""
+        self.open_friend_library(item.friend_id)
+        if item.kind == "movie":
+            self.friend_library.open_film(item)
+        elif item.kind == "episode" and item.parent_id is not None:
+            show = friend_item(item.friend_id, "show", item.parent_id)
+            if show is not None:
+                self.friend_library.open_show(show)
+
+    def _say_friend(self, text: str) -> None:
+        """Words about playing something of a friend's: on their library's page
+        when that is on screen, otherwise (Home) in the top bar's line."""
+        if self.stack.currentWidget() is self.friend_library:
+            self.friend_library.say(text)
+        else:
+            self._on_status(text)
+
+    def play_friend(self, item) -> None:
+        """Play something of a friend's (app/ui/friend_library_view.FriendItem).
+
+        Their PC is asked for it on a thread, since that is a connection and a
+        question to a PC that may be off: _on_friend_opened takes it from there,
+        with the stream or with the sentence saying why not.
+        """
+        if item.kind in ("album", "track"):
+            self._play_friend_music(item)
+            return
+        friend = db.friend(item.friend_id)
+        if friend is None:
+            return
+        self._say_friend(f"Asking {friend['name']}'s PC for {item.title}…")
+
+        def open_it() -> None:
+            from ..share import client, playback
+
+            stream = playback.Stream(item.friend_id, item.kind, item.remote_id)
+            try:
+                stream.open()
+            except client.ShareError as problem:
+                self._friend_opened.emit(item, None, str(problem))
+            except Exception:               # noqa: BLE001 - said on the page
+                logging.getLogger("share").exception("share: opening a friend's film failed")
+                self._friend_opened.emit(item, None, "Something went wrong asking their PC for it.")
+            else:
+                self._friend_opened.emit(item, stream, "")
+            finally:
+                db.close_thread_connection()
+
+        threading.Thread(target=open_it, name="share-open", daemon=True).start()
+
+    def watch_together(self, item, at: float | None = None, party: str | None = None) -> None:
+        """A movie night of a friend's film or episode, held by their PC for
+        their friends (app/share/nights.py). Their PC is asked on a thread (a
+        connection, to a PC that may be off); with its code, this Mistery joins
+        like any other movie night, through the Join panel, which shows each
+        step and, when it cannot, why. The code is then this person's to pass on
+        (the Join panel, and the player's menu). `at` and `party` ask for one
+        watched before again (watch_together_again)."""
+        if self.party_session().role is not None:
+            self._say_friend("You're already in a movie night. Leave it before you start another.")
+            return
+        friend = db.friend(item.friend_id)
+        if friend is None:
+            return
+        self._say_friend(f"Asking {friend['name']}'s PC to hold a movie night of {item.title}"
+                         f"{' again' if party else ''}…")
+
+        def ask() -> None:
+            from ..share import client
+
+            try:
+                with client.Channel(friend) as channel:
+                    answer = channel.night(item.kind, item.remote_id, at=at, party=party)
+                self._together_ready.emit(item, str(answer.get("code") or ""), "")
+            except client.ShareError as problem:
+                self._together_ready.emit(item, "", str(problem))
+            except Exception:                   # noqa: BLE001 - said on the page
+                logging.getLogger("share").exception("share: asking for a movie night failed")
+                self._together_ready.emit(item, "", "Something went wrong asking their PC.")
+            finally:
+                db.close_thread_connection()
+
+        threading.Thread(target=ask, name="share-night-ask", daemon=True).start()
+
+    def watch_together_again(self, item, row) -> None:
+        """Watch together again, on Home's card of a movie night a friend's PC
+        held: their PC starts it where it got to, as the same party, so the
+        card stays the one card and picks up from there."""
+        self.watch_together(item, at=float(row["position"] or 0.0), party=str(row["party_id"] or ""))
+
+    def _on_together_ready(self, item, code: str, problem: str) -> None:
+        if not code:
+            self._say_friend(problem)
+            return
+        self._say_friend("")
+        if item.kind == "movie":
+            # Their PC is on: its wide picture for Home's cards, while it is.
+            from ..share import art
+
+            art.fetch_wide(item.friend_id, item.kind, item.remote_id, item.backdrop_mark)
+        # Pressed Watch together, so joining is what was asked for: the panel
+        # opens with the code in it and joins, the same road as pasting it.
+        dialog = self._join_panel()
+        dialog.open_fresh()
+        dialog.code_input.setText(code)
+        self._show_dialog(dialog)
+        dialog._join_clicked()
+
+    def _on_friend_opened(self, item, stream, problem: str) -> None:
+        if stream is None:
+            if self.stack.currentWidget() is not self.friend_library:
+                # Started from Home: the whole reason is longer than the top
+                # bar's line, so it goes on the title's own page, beside Play.
+                self._on_status("")
+                self.open_friend_item(item)
+            self.friend_library.say(problem)
+            return
+        self._say_friend("")
+        if item.kind == "movie":
+            # Their PC is on: its wide picture for Continue Watching, while it is.
+            from ..share import art
+
+            art.fetch_wide(item.friend_id, item.kind, item.remote_id, item.backdrop_mark)
+        friend = db.friend(item.friend_id)
+        name = friend["name"] if friend is not None else "a friend"
+        if item.kind == "episode":
+            show = db.friend_media_one(item.friend_id, "show", item.parent_id) if item.parent_id else None
+            title = f"{show['title']}: {item.title}" if show is not None else item.title
+            numbered = (f"S{item.season} · E{item.episode}" if item.season is not None
+                        and item.episode is not None else "")
+            subtitle = " · ".join(bit for bit in (numbered, f"from {name}") if bit)
+        else:
+            title = item.title
+            subtitle = " · ".join(bit for bit in (str(item.year or ""), f"from {name}") if bit)
+        # No id and no path of this library's: the player keeps it out of every
+        # table of yours (PlayerView.play_friend).
+        media = MediaItem(title=title, year=item.year, duration=stream.duration or item.duration or 0.0)
+        start = item.position if 0 < item.progress < 0.97 else 0.0
+        if settings.get("pause_background_during_playback", True):
+            self.service.set_paused(True)
+        if self.music.is_playing:
+            self.music.pause()
+        self.player.set_line_up([], 0)
+        self._go(self.player)
+        self._sync_nav(None)
+        QApplication.processEvents()
+        QTimer.singleShot(0, lambda: self._begin_friend_playback(media, stream, start, subtitle))
+
+    def _begin_friend_playback(self, media: MediaItem, stream, start: float, subtitle: str) -> None:
+        if not self.player.play_friend(media, stream, start, subtitle):
+            self._on_player_closed()
+            self._say_friend("The video player could not start.")
+
+    def _play_friend_music(self, item) -> None:
+        """A friend's album, or one of its songs with the rest of the album
+        around it, in the music player.
+
+        Each song's address is on this PC (app/share/music.py): their PC is
+        asked for a song only when mpv comes for it, so this returns at once.
+        The songs carry "friend", which keeps them out of your play counts,
+        your Liked Songs and the queue that comes back after a restart
+        (app/music/player.py), and an id no song of this library can have.
+        """
+        from ..share import art, client
+        from ..share import music as friend_music
+
+        album_id = item.remote_id if item.kind == "album" else item.parent_id
+        album = db.friend_media_one(item.friend_id, "album", album_id) if album_id else None
+        songs = friend_items(item.friend_id, "track", parent_id=album_id) if album_id else [item]
+        if not songs:
+            self.friend_library.say("There's nothing on that album to play.")
+            return
+        try:
+            tunnel = friend_music.tunnel(item.friend_id)
+        except client.ShareError as problem:
+            self.friend_library.say(str(problem))
+            return
+        friend = db.friend(item.friend_id)
+        name = friend["name"] if friend is not None else "a friend"
+        cover = art.cached(item.friend_id, "album", album_id, album["art_mark"]) if album else None
+        album_title = album["title"] if album is not None else ""
+        album_artist = album["artist"] if album is not None else ""
+        tracks = [{
+            "id": -(item.friend_id * 1_000_000_000 + song.remote_id),
+            "friend": item.friend_id, "remote_id": song.remote_id,
+            "path": tunnel.song_url(song.remote_id),
+            "title": song.title, "artist": song.artist or album_artist,
+            "album_artist": album_artist, "album": album_title, "album_id": None,
+            "duration": song.duration or 0.0, "cover": cover, "state": "ready",
+            "disc_no": song.season, "track_no": song.episode,
+        } for song in songs]
+        start = next((index for index, song in enumerate(songs)
+                      if item.kind == "track" and song.remote_id == item.remote_id), 0)
+        context = {"kind": "friend", "id": item.friend_id, "album": album_id,
+                   "title": f"{name}: {album_title}" if album_title else name}
+        self.friend_library.say("")
+        self.music.play_tracks(tracks, start, in_order=True, context=context)
+
+    def _follow_friend_music(self) -> None:
+        """A friend's songs gone from the queue: their song relay goes too."""
+        from .. import share
+
+        music = getattr(share, "music", None)      # imported with the first friend's song
+        if music is not None:
+            music.close_unused({t["friend"] for t in self.music.queue if t.get("friend")})
 
     def _update_chrome(self) -> None:
         page = self.stack.currentWidget()
@@ -705,14 +976,16 @@ class MainWindow(QMainWindow):
     def open_artist(self, name: str) -> None:
         if not name:
             return
-        # Artist pages are keyed by an album's artist, exactly. A song credited
-        # to "A, B", or tagged in a different case, has none of its own — and
-        # opening one anyway left the previous artist's page on screen (Play
-        # played them) with the Back history emptied.
+        # Artist pages are keyed by an album's artist, with case and punctuation
+        # folded (music_library.artist_key), so "Bring Me the Horizon" on a song
+        # opens the one "Bring Me The Horizon" page. A song credited to "A, B"
+        # still has no page of its own — and opening one anyway left the
+        # previous artist's page on screen (Play played them) with the Back
+        # history emptied.
         if not music_library.artist_albums(name):
             self._on_status(f"No albums by {name} in the library.")
             return
-        self.artist_page.set_artist(name)
+        self.artist_page.set_artist(music_library.artist_name(name))
         self._go(self.artist_page)
         self._sync_nav(None)
 
@@ -744,6 +1017,18 @@ class MainWindow(QMainWindow):
                 pass
         elif kind == "artist":
             self.open_artist(str(ident or context.get("title") or ""))
+        elif kind == "friend":
+            # A friend's album: their library, open on that album.
+            try:
+                self.open_friend_library(int(ident))
+            except (TypeError, ValueError):
+                return
+            album = context.get("album")
+            if isinstance(album, int):
+                found = next((i for i in friend_items(int(ident), "album") if i.remote_id == album),
+                             None)
+                if found is not None:
+                    self.friend_library.open_album(found)
         elif kind in ("liked", "songs", "search"):
             # The list itself, searched again when the queue came from a search
             # (search results, or Liked Songs narrowed by one: the search is the
@@ -836,7 +1121,7 @@ class MainWindow(QMainWindow):
                 not self.music.is_playing and (not self.music.has_queue or self.music.is_idle)):
             presence.clear()
             return
-        from ..discord_presence import asset_key
+        from ..discord_presence import album_asset_key
 
         album = track.get("album_title") or track.get("album") or ""
         if settings.get("discord_hide_titles"):
@@ -848,9 +1133,29 @@ class MainWindow(QMainWindow):
         # song after a 12 s one ran out of time a third of the way in.
         length = track.get("duration") or self.music.duration or 0
         remaining = max(0.0, length - self.music.position)
+        # Films hand Discord the poster's public URL; a song asks for its album's
+        # cover by name, uploaded through the export, because covers come out of
+        # the music files and have no web address. The name is built from the
+        # album's own row — the artist and title the export used — so the two
+        # always agree, whatever this particular song's tags say.
         presence.set_listening(track.get("title") or "", track.get("artist") or "", album,
-                               remaining, not self.music.is_playing, asset_key(album))
+                               remaining, not self.music.is_playing,
+                               self._album_art_key(track, album))
         self._presence_anchor = (time.monotonic(), self.music.position, self.music.is_playing)
+
+    @staticmethod
+    def _album_art_key(track: dict, album: str) -> str:
+        """The name a song's cover was uploaded under: see discord_art.plan."""
+        from ..discord_presence import album_asset_key
+
+        album_id = track.get("album_id")
+        if album_id:
+            row = db.query_one("SELECT artist, title FROM albums WHERE id = ?", (album_id,))
+            if row is not None:
+                return album_asset_key(row["artist"], row["title"])
+        # A song the library has not grouped into an album: its own tags are
+        # all there is, and the export never wrote anything for it anyway.
+        return album_asset_key(track.get("album_artist") or track.get("artist") or "", album)
 
     def _on_music_position(self, position: float, _duration: float) -> None:
         """Republish when the song jumps rather than plays on — a seek, or
@@ -1150,6 +1455,31 @@ class MainWindow(QMainWindow):
         dialog.open_fresh()
         self._show_dialog(dialog)
 
+    def open_link(self, link: str) -> None:
+        """A mistery:// link was clicked (main.py hands it over): a friend's
+        code, or a movie night's invite.
+
+        Never acted on by itself. Any web page can make a browser open a link,
+        so a link only puts the code where it would have been pasted, and adding
+        the friend or joining stays the owner's own press of the button.
+        """
+        from ..party import invite
+
+        try:
+            found = invite.decode(link)
+        except invite.InviteError:
+            self._on_status("That link has no Mistery code in it.")
+            return
+        code = invite.encode(found)
+        if found.kind == invite.KIND_PAIR:
+            self._on_nav(_NAV_FRIENDS)
+            self.friends_page.prefill(code)
+            return
+        dialog = self._join_panel()
+        dialog.open_fresh()
+        dialog.code_input.setText(code)
+        self._show_dialog(dialog)
+
     def show_movie_night(self) -> None:
         """The top bar's button and the player's: the panel of the movie night
         that is on, or Join when none is."""
@@ -1197,6 +1527,8 @@ class MainWindow(QMainWindow):
         with nobody else in it (or none on), and with friends in only if the
         host says so (party_dialog.ask_to_end). A guest's own leaving is theirs
         alone and is not asked about."""
+        if quitting and not ask_to_end_friends_night(self):
+            return False            # friends watching a film of this PC's, in a movie night on it
         if self._party is None:
             return True             # never made: no movie night has been near this window
         return ask_to_end(self, self._party, quitting=quitting)
@@ -1287,6 +1619,28 @@ class MainWindow(QMainWindow):
         if self.stack.currentWidget() is self.player:
             self.player._sync_overlay()
 
+    # Below this width the page names close up (theme.py, #TopBar[compact]).
+    # With Friends among them the bar needs about 1040 px at their usual
+    # spacing, and under that the squeeze landed on the wordmark: 104 of its
+    # 139 px at the window's 960 px minimum.
+    _COMPACT_BELOW = 1060
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_topbar()
+
+    def _fit_topbar(self) -> None:
+        bar = getattr(self, "topbar", None)
+        compact = self.width() < self._COMPACT_BELOW
+        if bar is None or bool(bar.property("compact")) == compact:
+            return
+        bar.setProperty("compact", compact)
+        for button in self._nav_group.buttons():
+            # A dynamic property only restyles what is polished again.
+            button.style().unpolish(button)
+            button.style().polish(button)
+        bar.updateGeometry()
+
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
@@ -1339,6 +1693,32 @@ class MainWindow(QMainWindow):
         # (a few seconds at most, for a router that has stopped answering).
         if self._party is not None:
             self._party.shutdown()
+        # Then library sharing's listener, which that movie night may have been
+        # held on: friends' streams end here, and the Mistery serving them
+        # without a window (--share) takes the port back within a second.
+        # Never imported means never started, and not worth importing to find out.
+        from .. import share
+
+        # A friend's movie night on this PC's film (app/share/nights.py) ends
+        # with its listener: told in words, not by a connection going dead.
+        nights = getattr(share, "nights", None)
+        if nights is not None:
+            from ..party import people
+
+            nights.end_now(f"{people.display_name()} closed Mistery, so the movie night on "
+                           "their PC has ended.")
+        sharing = getattr(share, "sharer", None)
+        if sharing is not None:
+            sharing.stop(force=True)
+            # And friends go on being served with the window closed: the
+            # Mistery without one starts now, not at the next sign-in, and
+            # takes the port once this one has gone (app/share/background.py).
+            from ..share import background
+
+            background.start_now()
+        songs = getattr(share, "music", None)       # a friend's songs were played
+        if songs is not None:
+            songs.close_all()
         self.player.shutdown()
         self.music.shutdown()
         self.service.shutdown()

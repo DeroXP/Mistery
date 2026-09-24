@@ -315,6 +315,70 @@ CREATE TABLE IF NOT EXISTS party_progress (
 );
 CREATE INDEX IF NOT EXISTS idx_party_recent ON party_progress(updated_at);
 
+-- Library sharing. A friend is another Mistery this one has been paired with;
+-- the row is written on both sides, and either can browse and play what the
+-- other has. `pin` is the fingerprint of their certificate, and a connection
+-- claiming to be them is refused unless the certificate on it matches (see
+-- app/share/identity.py). Removing a friend deletes the row, and with it the
+-- copy of their library and your place in it.
+CREATE TABLE IF NOT EXISTS friends (
+    id           INTEGER PRIMARY KEY,
+    person_id    TEXT NOT NULL UNIQUE,         -- their install's id, the one movie night uses
+    name         TEXT NOT NULL,                -- what they call themselves
+    pin          TEXT NOT NULL,                -- hex, their certificate's first 16 SHA-256 bytes
+    certificate  TEXT NOT NULL,                -- their certificate, PEM: the listener's trust store
+    lan_ip       TEXT,                         -- where they answered on a home network
+    wan_ip       TEXT,                         -- where they answered from outside
+    port         INTEGER,
+    added_at     REAL,
+    last_seen    REAL,                         -- the last time a connection with them worked
+    sharing      INTEGER NOT NULL DEFAULT 1,   -- 0: still a friend, served nothing for now
+    catalog_at   REAL,                         -- when their library was last copied
+    catalog_mark TEXT                          -- their mark for it, so only changes come next time
+);
+
+-- What a friend has, as they last said. Kept so their library can be browsed
+-- while their PC is off, and only ever written from what they sent: nothing
+-- here is the truth about anyone's disk, it is a copy of their catalogue.
+CREATE TABLE IF NOT EXISTS friend_media (
+    id         INTEGER PRIMARY KEY,
+    friend_id  INTEGER NOT NULL,
+    kind       TEXT NOT NULL,                  -- movie | episode | album | track
+    remote_id  INTEGER NOT NULL,               -- the id it has on their PC
+    parent_id  INTEGER,                        -- their show or album, for an episode or a track
+    title      TEXT,
+    sort_title TEXT,
+    year       INTEGER,
+    season     INTEGER,
+    episode    INTEGER,
+    duration   REAL,
+    artist     TEXT,
+    genres     TEXT,
+    overview   TEXT,
+    art        TEXT,                           -- our copy of their artwork, once fetched
+    art_mark   TEXT,                           -- their mark for that artwork
+    backdrop_mark TEXT,                        -- their mark for its wide picture (a film's backdrop)
+    updated_at REAL,
+    UNIQUE(friend_id, kind, remote_id)
+);
+CREATE INDEX IF NOT EXISTS idx_friend_media ON friend_media(friend_id, kind, sort_title);
+
+-- Where you got to in something of a friend's, kept on your PC. Their own
+-- progress is theirs and never moves because you watched it, which is the rule
+-- party_progress follows for a movie night.
+CREATE TABLE IF NOT EXISTS friend_progress (
+    id         INTEGER PRIMARY KEY,
+    friend_id  INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    remote_id  INTEGER NOT NULL,
+    position   REAL NOT NULL DEFAULT 0,
+    duration   REAL,
+    watched    INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL,
+    UNIQUE(friend_id, kind, remote_id)
+);
+CREATE INDEX IF NOT EXISTS idx_friend_progress ON friend_progress(updated_at);
+
 CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album_id, disc_no, track_no);
 CREATE INDEX IF NOT EXISTS idx_tracks_state  ON tracks(state, missing);
 CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(sort_artist, year);
@@ -363,6 +427,10 @@ _MIGRATIONS: dict[str, list[str]] = {
         # from it because the metadata pass rewrites `genres` whenever better
         # data arrives, and a hand-made choice must survive that.
         "user_genres TEXT",
+        # Where `poster` and `backdrop` were downloaded from. See the artwork
+        # addresses section below for why we keep them.
+        "poster_url TEXT",
+        "backdrop_url TEXT",
     ],
     "media": [
         # Per-episode values learned by audio fingerprinting; they win over the
@@ -372,6 +440,8 @@ _MIGRATIONS: dict[str, list[str]] = {
         "credits_at REAL",
         "tv_state TEXT NOT NULL DEFAULT 'pending'",   # pending | done
         "user_genres TEXT",       # see shows.user_genres
+        "poster_url TEXT",        # see shows.poster_url
+        "backdrop_url TEXT",
     ],
     "tracks": [
         # EBU R128 loudness and true peak, measured once per file, so every
@@ -390,16 +460,32 @@ _MIGRATIONS: dict[str, list[str]] = {
         "loudness REAL",                             # the album as one piece
         "peak REAL",
     ],
+    "friend_media": [
+        "backdrop_mark TEXT",                        # a friend's film's wide picture
+    ],
 }
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    added: set[str] = set()
     for table, columns in _MIGRATIONS.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         for column in columns:
             name = column.split()[0]
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+                added.add(f"{table}.{name}")
+
+    # Only on the launch that adds the columns. The statements in it rewrite
+    # rows unconditionally, so run every time they would re-queue a library
+    # that the metadata pass had since settled.
+    if "media.poster_url" in added:
+        _recover_art_urls(conn)
+    # A catalogue copied before the column was there has no backdrop marks, and
+    # its friends' PCs would answer "unchanged" to the marks already held: so
+    # none are held, and the next look at each friend's library brings it all.
+    if "friend_media.backdrop_mark" in added:
+        conn.execute("UPDATE friends SET catalog_mark = NULL")
 
     # Loudness needs a complete file: a track still downloading would measure
     # whatever has arrived so far, and an unreadable one cannot be measured at
@@ -459,6 +545,19 @@ def query_one(sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
 def execute(sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
     with _write_lock:
         return connect().execute(sql, params)
+
+
+def execute_many(sql: str, rows: Sequence[Sequence[Any]]) -> None:
+    """One statement over many rows, under one lock. Nothing at all for none.
+
+    A friend's catalogue arrives a few hundred rows at a time; one executemany
+    is one write where a loop over execute() would take and release the lock
+    for each row.
+    """
+    if not rows:
+        return
+    with _write_lock:
+        connect().executemany(sql, rows)
 
 
 # --- shows ------------------------------------------------------------------
@@ -622,6 +721,7 @@ def known_paths() -> dict[str, tuple[float, int]]:
 
 def upsert_media(record: dict) -> int:
     """Insert a newly discovered file, or refresh an existing row in place."""
+    record = _with_art_urls(record)
     with _write_lock:
         conn = connect()
         row = conn.execute("SELECT id FROM media WHERE path = ?", (record["path"],)).fetchone()
@@ -646,6 +746,7 @@ def upsert_media(record: dict) -> int:
 def update_media(media_id: int, **fields) -> None:
     if not fields:
         return
+    fields = _with_art_urls(fields)
     assignments = ", ".join(f"{k} = ?" for k in fields)
     execute(f"UPDATE media SET {assignments} WHERE id = ?", [*fields.values(), media_id])
 
@@ -653,8 +754,130 @@ def update_media(media_id: int, **fields) -> None:
 def update_show(show_id: int, **fields) -> None:
     if not fields:
         return
+    fields = _with_art_urls(fields)
     assignments = ", ".join(f"{k} = ?" for k in fields)
     execute(f"UPDATE shows SET {assignments} WHERE id = ?", [*fields.values(), show_id])
+
+
+# --- artwork addresses ------------------------------------------------------
+#
+# `poster` and `backdrop` are files on this PC. `poster_url` and `backdrop_url`
+# are the public web addresses those files were downloaded from, where there
+# was one: TMDB, TVmaze and Wikipedia all serve their pictures openly, and the
+# app used to keep the picture and throw the address away.
+#
+# The address is worth keeping because Discord's rich presence accepts a plain
+# image URL and fetches the picture itself, so a new film can show its poster
+# to friends the day it is added, instead of waiting for someone to export PNGs
+# and upload them to the developer portal by hand.
+#
+# NULL is an ordinary answer, not a failure: artwork composed here out of the
+# film's own frames (meta_source 'ffmpeg') has no address and never will.
+
+ART_URL_COLUMNS = {"poster": "poster_url", "backdrop": "backdrop_url"}
+
+# What `kind` means to art_url. Films and episodes are both rows in media; a
+# show is the series, which is where an episode's poster actually lives.
+_ART_TABLES = {"movie": "media", "episode": "media", "media": "media", "show": "shows"}
+
+
+def _with_art_urls(fields: dict) -> dict:
+    """The same fields, with an address cleared wherever its picture is replaced.
+
+    Artwork changes source in both directions: a film matched on TMDB today can
+    be re-cut from its own frames tomorrow, when a refetch finds nothing and the
+    metadata pass falls back. Whoever writes the new file knows its address, or
+    knows there is none, and writes both columns together — so a write that sets
+    `poster` and says nothing about `poster_url` is a picture that came from
+    somewhere else, and the old address no longer describes it.
+
+    Doing it here rather than at each of the writers is what stops a stale
+    https:// address reaching Discord, where it would show friends the wrong
+    poster with no sign on this PC that anything was wrong.
+    """
+    stale = {url_column: None for column, url_column in ART_URL_COLUMNS.items()
+             if column in fields and url_column not in fields}
+    return {**fields, **stale} if stale else fields
+
+
+def art_url(kind: str, item_id: int | None, which: str = "poster") -> str | None:
+    """The public web address of this title's artwork, or None if it has none.
+
+    `kind` is "movie" or "episode" (or plain "media") for a row in the library,
+    and "show" for a series. This is the whole of what the Discord side needs to
+    know: it asks whether there is a public picture, and never has to learn what
+    TMDB, TVmaze, Wikipedia or ffmpeg are.
+    """
+    table = _ART_TABLES.get((kind or "").strip().lower())
+    column = ART_URL_COLUMNS.get((which or "").strip().lower())
+    if table is None or column is None or not item_id:
+        return None
+    row = query_one(f"SELECT {column} AS url FROM {table} WHERE id = ?", (int(item_id),))
+    address = ((row["url"] if row else None) or "").strip()
+    # A web address or nothing: a local path in this column is a bug somewhere,
+    # and answering with it would send a path off this PC. This is the coarse
+    # check — anything actually bound for Discord goes through
+    # discord_presence.public_image_url, which is stricter on purpose.
+    return address if address.lower().startswith(("http://", "https://")) else None
+
+
+def _recover_art_urls(conn: sqlite3.Connection) -> None:
+    """Fill the new columns in for art already on disk, without asking anyone.
+
+    Every downloader here names the file after the reply that described it —
+    `tvmaze-4242-s01e04.jpg`, `tmdb-movie-424242-p.jpg` — and those replies are
+    still in http_cache, which nothing prunes: the month-long age limit only
+    stops them being read as fresh. So the address can be matched back to the
+    file with certainty and no network at all. Measured on a copy of this
+    library (254 rows, 75 cached replies, no TMDB key): 228 of the 229 episode
+    stills and all 4 show posters came back, with db.init() taking 0.19 s in
+    total. The one still that did not was cut from the episode itself, because
+    TVmaze had none for it — so there is no address to find.
+
+    A Wikipedia poster cannot be matched: `wiki-low-tide-2019.jpg` is named
+    after the film, not the article it came from, and nothing in a cached
+    article says which film settled on it. Those rows (11 films here) go back
+    to 'pending' instead, and the next metadata pass writes the address without
+    fetching the picture again — every downloader here hands back the file
+    already on disk.
+    """
+    from .metadata import art_urls        # deferred: app.metadata imports db
+
+    # Only the replies that can name a picture. The rest of http_cache is
+    # search results, Wikipedia articles, Wikidata and iTunes — and an iTunes
+    # reply alone ran to 100 KB before it was trimmed, so a library with a few
+    # thousand of those would be parsed for nothing.
+    cached = conn.execute(
+        "SELECT key, body FROM http_cache WHERE key LIKE 'tmdb:/movie/%' "
+        "OR key LIKE 'tmdb:/tv/%' OR key LIKE 'online:https://api.tvmaze.com/%'"
+    ).fetchall()
+    known = art_urls.addresses_by_name((row["key"], row["body"]) for row in cached)
+    for table in ("media", "shows"):
+        for column, url_column in ART_URL_COLUMNS.items():
+            rows = conn.execute(
+                f"SELECT id, {column} AS art FROM {table} "
+                f"WHERE {column} IS NOT NULL AND {url_column} IS NULL"
+            ).fetchall()
+            for row in rows:
+                address = known.get(Path(row["art"]).stem)
+                if address:
+                    conn.execute(f"UPDATE {table} SET {url_column} = ? WHERE id = ?",
+                                 (address, row["id"]))
+
+    # Whatever is left had its art from a source that publishes addresses, but
+    # none we could match. Back to 'pending' so the next metadata pass fills it
+    # in; rows already 'pending' or 'fallback' are queued anyway, and rows whose
+    # art this app composed itself are left alone — they have nothing to fetch.
+    conn.execute(
+        "UPDATE media SET meta_state = 'pending' WHERE meta_state = 'done' "
+        "AND meta_source IN ('tmdb', 'tvmaze', 'wikipedia') "
+        "AND poster_url IS NULL AND backdrop_url IS NULL "
+        "AND (poster IS NOT NULL OR backdrop IS NOT NULL)"
+    )
+    conn.execute(
+        "UPDATE shows SET meta_state = 'pending' WHERE meta_state = 'done' "
+        "AND poster IS NOT NULL AND poster_url IS NULL"
+    )
 
 
 def get_media(media_id: int) -> sqlite3.Row | None:
@@ -1075,6 +1298,182 @@ def recent_parties(limit: int = 20) -> list[sqlite3.Row]:
 
 def forget_party(party_id: str) -> None:
     execute("DELETE FROM party_progress WHERE party_id = ?", (party_id,))
+
+
+# --- library sharing ----------------------------------------------------------
+#
+# Friends, the copy of what each of them has, and where you got to in it. Your
+# own progress table is never touched by any of this, and theirs is never
+# touched by you: a friend's row moves only on the PC it belongs to.
+
+def friends(include_paused: bool = True) -> list[sqlite3.Row]:
+    """Everyone this Mistery is paired with, by name."""
+    where = "" if include_paused else "WHERE sharing = 1 "
+    return query(f"SELECT * FROM friends {where}ORDER BY name COLLATE NOCASE, id")
+
+
+def friend(friend_id: int) -> sqlite3.Row | None:
+    return query_one("SELECT * FROM friends WHERE id = ?", (friend_id,))
+
+
+def friend_by_person(person_id: str) -> sqlite3.Row | None:
+    return query_one("SELECT * FROM friends WHERE person_id = ?", (person_id,))
+
+
+def friend_by_pin(pin: str) -> sqlite3.Row | None:
+    """Which friend a connection belongs to, from the certificate it showed."""
+    return query_one("SELECT * FROM friends WHERE pin = ?", (pin.lower(),))
+
+
+def friend_certificates(include_paused: bool = True) -> list[str]:
+    """Every friend's certificate, for the listener's trust store.
+
+    A paused friend is included on purpose: pausing stops them being served,
+    and that refusal is a sentence they can read, not a handshake that fails
+    with nothing to say.
+    """
+    return [row["certificate"] for row in friends(include_paused) if row["certificate"]]
+
+
+def add_friend(person_id: str, name: str, pin: str, certificate: str, *,
+               lan_ip: str | None = None, wan_ip: str | None = None,
+               port: int | None = None) -> int:
+    """Write down a friend, or bring an existing one up to date. Returns their id.
+
+    Pairing with somebody already paired replaces their certificate and name:
+    that is what a friend who reinstalled Mistery looks like, and they had to
+    show a fresh code to get here.
+    """
+    now = time.time()
+    execute(
+        "INSERT INTO friends (person_id, name, pin, certificate, lan_ip, wan_ip, port, "
+        "added_at, last_seen, sharing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1) "
+        "ON CONFLICT(person_id) DO UPDATE SET name = excluded.name, pin = excluded.pin, "
+        "certificate = excluded.certificate, lan_ip = COALESCE(excluded.lan_ip, lan_ip), "
+        "wan_ip = COALESCE(excluded.wan_ip, wan_ip), port = COALESCE(excluded.port, port), "
+        "last_seen = excluded.last_seen",
+        (person_id, name, pin.lower(), certificate, lan_ip, wan_ip, port, now, now),
+    )
+    row = friend_by_person(person_id)
+    return int(row["id"]) if row else 0
+
+
+_FRIEND_FIELDS = {"name", "lan_ip", "wan_ip", "port", "last_seen", "sharing",
+                  "catalog_at", "catalog_mark", "pin", "certificate"}
+
+
+def update_friend(friend_id: int, **fields) -> None:
+    """Change what a friend's row says. Only the columns above can be set."""
+    unknown = set(fields) - _FRIEND_FIELDS
+    if unknown:
+        raise ValueError(f"not a friend column: {', '.join(sorted(unknown))}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{name} = ?" for name in fields)
+    execute(f"UPDATE friends SET {assignments} WHERE id = ?",
+            (*fields.values(), friend_id))
+
+
+def remove_friend(friend_id: int) -> None:
+    """Forget a friend, the copy of their library and your place in it."""
+    execute("DELETE FROM friend_media WHERE friend_id = ?", (friend_id,))
+    execute("DELETE FROM friend_progress WHERE friend_id = ?", (friend_id,))
+    execute("DELETE FROM friends WHERE id = ?", (friend_id,))
+
+
+def save_friend_media(friend_id: int, items: list[dict]) -> int:
+    """Store part of a friend's catalogue. Returns how many rows were written.
+
+    Each item is what their catalogue sent: kind and remote_id identify it, and
+    whatever else is there is kept. A second call with the same ids updates them
+    rather than making a second copy, so an update that only carries what
+    changed can be applied on its own.
+    """
+    columns = ("kind", "remote_id", "parent_id", "title", "sort_title", "year", "season",
+               "episode", "duration", "artist", "genres", "overview", "art", "art_mark",
+               "backdrop_mark")
+    now = time.time()
+    rows = []
+    for item in items:
+        if not item.get("kind") or item.get("remote_id") is None:
+            raise ValueError("every catalogue item needs a kind and a remote_id")
+        rows.append((friend_id, *(item.get(name) for name in columns), now))
+    if not rows:
+        return 0
+    names = ", ".join(("friend_id", *columns, "updated_at"))
+    marks = ", ".join("?" * (len(columns) + 2))
+    updates = ", ".join(f"{name} = excluded.{name}" for name in columns[2:])
+    execute_many(
+        f"INSERT INTO friend_media ({names}) VALUES ({marks}) "
+        f"ON CONFLICT(friend_id, kind, remote_id) DO UPDATE SET {updates}, "
+        "parent_id = COALESCE(excluded.parent_id, parent_id), updated_at = excluded.updated_at",
+        rows)
+    return len(rows)
+
+
+def friend_media(friend_id: int, kind: str | None = None, *, parent_id: int | None = None,
+                 limit: int | None = None) -> list[sqlite3.Row]:
+    """A friend's things, as they last described them."""
+    where = ["friend_id = ?"]
+    values: list = [friend_id]
+    if kind:
+        where.append("kind = ?")
+        values.append(kind)
+    if parent_id is not None:
+        where.append("parent_id = ?")
+        values.append(parent_id)
+    tail = f" LIMIT {int(limit)}" if limit else ""
+    return query(f"SELECT * FROM friend_media WHERE {' AND '.join(where)} "
+                 f"ORDER BY sort_title COLLATE NOCASE, season, episode{tail}", tuple(values))
+
+
+def friend_media_one(friend_id: int, kind: str, remote_id: int) -> sqlite3.Row | None:
+    return query_one("SELECT * FROM friend_media WHERE friend_id = ? AND kind = ? "
+                     "AND remote_id = ?", (friend_id, kind, remote_id))
+
+
+def forget_friend_media(friend_id: int, kind: str, remote_ids: list[int]) -> None:
+    """Drop things a friend no longer has, named in their catalogue update."""
+    execute_many("DELETE FROM friend_media WHERE friend_id = ? AND kind = ? AND remote_id = ?",
+                 [(friend_id, kind, int(remote_id)) for remote_id in remote_ids])
+
+
+def save_friend_progress(friend_id: int, kind: str, remote_id: int, position: float, *,
+                         duration: float | None = None, watched: bool | None = None) -> None:
+    """Where you got to in something of theirs. Never sent to them."""
+    # `watched` left out means "leave it as it was", and a new row starts at 0:
+    # a position saved every ten seconds must not keep unmarking something the
+    # viewer has already finished, and the column cannot hold NULL.
+    flag = None if watched is None else int(watched)
+    execute(
+        "INSERT INTO friend_progress (friend_id, kind, remote_id, position, duration, "
+        "watched, updated_at) VALUES (?, ?, ?, ?, ?, COALESCE(?, 0), ?) "
+        "ON CONFLICT(friend_id, kind, remote_id) DO UPDATE SET position = excluded.position, "
+        "duration = COALESCE(excluded.duration, duration), "
+        "watched = COALESCE(?, watched), updated_at = excluded.updated_at",
+        (friend_id, kind, remote_id, float(position), duration, flag, time.time(), flag),
+    )
+
+
+def friend_progress(friend_id: int, kind: str, remote_id: int) -> sqlite3.Row | None:
+    return query_one("SELECT * FROM friend_progress WHERE friend_id = ? AND kind = ? "
+                     "AND remote_id = ?", (friend_id, kind, remote_id))
+
+
+def friend_continue_watching(limit: int = 20, min_seconds: float = 30.0) -> list[sqlite3.Row]:
+    """Friends' films and episodes you are part way through, most recent first,
+    by continue_watching's rules for your own. Only what they still have: a
+    title gone from their catalogue cannot be resumed, so it is not offered."""
+    return query(
+        "SELECT p.friend_id, p.kind, p.remote_id, p.position, p.updated_at, m.title, "
+        "f.name AS friend_name "
+        "FROM friend_progress p JOIN friends f ON f.id = p.friend_id "
+        "JOIN friend_media m ON m.friend_id = p.friend_id AND m.kind = p.kind "
+        "AND m.remote_id = p.remote_id "
+        "WHERE p.kind IN ('movie', 'episode') AND p.watched = 0 AND p.position > ? "
+        "AND (COALESCE(p.duration, m.duration, 0) <= 0 "
+        "OR p.position < COALESCE(p.duration, m.duration) * 0.97) "
+        "ORDER BY p.updated_at DESC LIMIT ?", (min_seconds, limit))
 
 
 # --- http cache -------------------------------------------------------------

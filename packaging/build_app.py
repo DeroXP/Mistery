@@ -77,6 +77,18 @@ MOVIE_NIGHT_MODULES = (
     "cryptography.x509", "cryptography.hazmat.primitives.asymmetric.ec", "ssl",
 )
 
+# What library sharing needs (1.3.0), looked for the same way. Most of it is
+# imported inside functions, and the Mistery with no window (`Mistery.exe
+# --share`, started at sign-in) imports it with no screen to show an error on:
+# a module missing from the bundle would fail there, where nobody sees it, and
+# friends would simply find the PC unreachable.
+SHARING_MODULES = (
+    "app.share.identity", "app.share.pairing", "app.share.server", "app.share.client",
+    "app.share.sharer", "app.share.background", "app.share.catalog", "app.share.art",
+    "app.share.playback", "app.share.music", "app.share.nights", "app.party.media",
+    "app.ui.friends_view", "app.ui.friend_library_view",
+)
+
 
 def app_version() -> str:
     """The version in app/__init__.py, read rather than imported.
@@ -201,17 +213,19 @@ def modules_in_exe(exe: Path) -> set[str]:
 
 
 def check_movie_night(bundle: Path, exe: Path) -> int:
-    """Raise unless everything movie night needs is in the bundle. Returns how
-    many modules were checked, for the report."""
+    """Raise unless everything movie night and library sharing need is in the
+    bundle. Returns how many modules were checked, for the report."""
     frozen = modules_in_exe(exe)
-    missing = [name for name in MOVIE_NIGHT_MODULES if name not in frozen]
+    wanted = MOVIE_NIGHT_MODULES + SHARING_MODULES
+    missing = [name for name in wanted if name not in frozen]
     # cryptography's compiled half, OpenSSL included, is one file beside the exe.
     rust = bundle / "_internal" / "cryptography" / "hazmat" / "bindings" / "_rust.pyd"
     if not rust.is_file():
         missing.append(str(rust.relative_to(bundle)))
     if missing:
-        raise SystemExit("the build is missing what movie night needs: " + ", ".join(missing))
-    return len(MOVIE_NIGHT_MODULES)
+        raise SystemExit("the build is missing what movie night or sharing needs: "
+                         + ", ".join(missing))
+    return len(wanted)
 
 
 def folder_size(folder: Path) -> tuple[int, int]:
@@ -304,7 +318,8 @@ def build(out_root: Path, keep_work: bool = False) -> Path:
     print(f"  version          {version} (exe resource says {stamped}, version.txt agrees)")
     print(f"  icon             _internal\\assets\\icon.ico, "
           f"{icon_in_bundle.stat().st_size / 1024:.0f} KB")
-    print(f"  movie night      {party_checked} modules found in the exe, and cryptography's _rust.pyd")
+    print(f"  movie night      {party_checked} modules for it and for sharing found in the exe, "
+          "and cryptography's _rust.pyd")
     print(f"  built in         {took:.0f} s")
     return bundle
 

@@ -596,6 +596,9 @@ class PartySession(QObject):
     stun_servers = None                 # None: stun.SERVERS; () asks nobody
     stun_timeout = 2.0
     upnp_timeout = 4.0
+    # Hold the movie night on library sharing's listener when sharing has the
+    # port (app/share/sharer.py). Tests of the movie night on its own turn it off.
+    borrow_from_sharing = True
 
     _cleaned_up = False                 # upnp.cleanup_stale(), once per run
 
@@ -649,6 +652,7 @@ class PartySession(QObject):
         self._status = ""
         self._room = None                   # the Hub (host) or the Client (guest)
         self._server = None
+        self._borrowed = False              # host: _server is library sharing's, lent
         self._mapping = None
         self._proxy = None
         self._invite = None
@@ -671,6 +675,8 @@ class PartySession(QObject):
         self._restarts = 0
         self._attached = False
         self._rejoining = False                     # guest: "Join again" from the picture, connecting
+        self._guest_connect = None                  # guest of a friend's PC: connect showing our certificate
+        self._friend_host: str | None = None        # ...and that friend's name, the room having nobody of theirs
 
     # --- what panels read ----------------------------------------------------------------
 
@@ -763,7 +769,9 @@ class PartySession(QObject):
             return (self.me or _people.me()).name
         room = self._room
         host = getattr(room, "host", None) if room is not None else None
-        return host.name if host is not None else ""
+        if host is not None:
+            return host.name
+        return getattr(self, "_friend_host", None) or ""
 
     @property
     def state(self) -> sync.RoomState | None:
@@ -843,12 +851,35 @@ class PartySession(QObject):
         listener, the router and STUN. What it made goes into job.result, and is
         taken apart again here if any step fails."""
         from . import invite, server as server_mod, tls, transcode, upnp
+        from ..share import sharer as share_sharer
 
         made = job.result
         lan = job.lan or upnp.lan_ip()
-        identity = tls.new_identity([lan] if lan else [])
         token = invite.new_token()
-        server = server_mod.PartyServer(identity, token, job.port, bind=self.bind)
+        # With library sharing on, the port is already open, by sharing: the
+        # movie night is held on that listener (and behind its certificate and
+        # its router forward) instead of fighting it for the port.
+        lender = share_sharer.current() if self.borrow_from_sharing else None
+        borrowed = lender.lend() if lender is not None else None
+        if borrowed is not None:
+            from ..share import identity as share_identity
+
+            try:
+                borrowed.host_party(token)
+            except server_mod.ServerError as exc:
+                from ..share import nights
+
+                night = nights.current()
+                if night is not None:
+                    # A friend's movie night on this PC's film has the listener.
+                    raise _Refused(nights.OWNER_BUSY.format(title=night.title)) from None
+                raise _Refused(str(exc)) from None
+            server, pin = borrowed, share_identity.identity().pin
+            made["borrowed"] = True
+            _log.info("movie night: on library sharing's listener, port %s", borrowed.port)
+        else:
+            identity = tls.new_identity([lan] if lan else [])
+            server, pin = server_mod.PartyServer(identity, token, job.port, bind=self.bind), identity.pin
         made["server"] = server
         try:
             default = server.set_media(job.item.path, job.item.duration or None, job.quality)
@@ -860,28 +891,43 @@ class PartySession(QObject):
                        playing=False, on_event=self._sync_events(job.generation))
         made["hub"] = hub
         server.sync_handler = hub.accept
-        try:
-            port = server.start()
-        except server_mod.ServerError as exc:
-            raise _Refused(str(exc)) from None
-        self._relay.status.emit(job.generation, f"Asking your router to open port {port}, and "
-                                "finding your internet address…")
-        status, mapping = self._open_port(port, lan)
+        if borrowed is not None:
+            port = borrowed.port
+            self._relay.status.emit(job.generation, "Finding your internet address…")
+            status, mapping = self._open_port(port, lan, lent=lender.mapping or False)
+        else:
+            try:
+                port = server.start()
+            except server_mod.ServerError as exc:
+                raise _Refused(str(exc)) from None
+            self._relay.status.emit(job.generation, f"Asking your router to open port {port}, and "
+                                    "finding your internet address…")
+            status, mapping = self._open_port(port, lan)
         made["mapping"] = mapping
         try:
-            code = invite.encode(invite.Invite(status.wan_ip, lan, port, token, identity.pin))
+            code = invite.encode(invite.Invite(status.wan_ip, lan, port, token, pin))
         except invite.InviteError as exc:
             raise _Refused(str(exc)) from None
-        made.update(port=port, status=status, code=code, link=invite.link(code), media=media,
+        made.update(port=port, status=status, code=code, link=invite.web_link(code), media=media,
                     default=default)
 
-    def _open_port(self, port: int, lan: str | None) -> tuple[PortStatus, object]:
+    def _open_port(self, port: int, lan: str | None, lent=None) -> tuple[PortStatus, object]:
         """Ask the router for the port while asking STUN for the internet address; the
         two share nothing, so the slower of them is all it costs (2 s here, where
-        the router does not answer UPnP)."""
+        the router does not answer UPnP).
+
+        lent: on library sharing's listener, the router is sharing's business
+        and is not asked again. lent is its forward (upnp.Mapping), or False
+        when it has none; either way the movie night makes no forward of its
+        own, so returns no mapping to renew or take down."""
         from . import stun, upnp
 
         tunnel = upnp.vpn()
+        forwarded = bool(settings.get("party_forwarded", False))
+        if lent:
+            return PortStatus("upnp", f"Your router is forwarding port {port} to this PC for "
+                              "library sharing. Friends anywhere can join.", port, lan,
+                              lent.external_ip, lent.router, tunnel, forwarded), None
         servers = stun.SERVERS if self.stun_servers is None else tuple(self.stun_servers)
         found: list[str | None] = []
         asker = None
@@ -892,7 +938,7 @@ class PartySession(QObject):
             asker.start()
         mapping = problem = None
         upnp_on = bool(settings.get("party_upnp", True))
-        if upnp_on:
+        if upnp_on and lent is None:
             try:
                 mapping = upnp.open_port(port, lan, gateway_url=self.gateway_url,
                                          timeout=self.upnp_timeout)
@@ -905,7 +951,6 @@ class PartySession(QObject):
             asker.join(self.stun_timeout + 1.0)
         public = found[0] if found else None
         router = getattr(problem, "router", None) or (mapping.router if mapping else None)
-        forwarded = bool(settings.get("party_forwarded", False))
         if mapping is not None:
             return PortStatus("upnp", f"Your router opened port {port} for this movie night; it "
                               "closes again when the movie night ends. Friends anywhere can join.",
@@ -943,6 +988,7 @@ class PartySession(QObject):
             self._fail(text)
             return
         self._server = made["server"]
+        self._borrowed = bool(made.get("borrowed"))
         self._room = made["hub"]
         self._mapping = made.get("mapping")
         self._port = made["port"]
@@ -990,6 +1036,22 @@ class PartySession(QObject):
         except invite.InviteError as exc:
             self.error.emit(str(exc))
             return False
+        if parsed.kind not in invite.NIGHTS:
+            # A friend code, which looks the same to a person. Name it.
+            from ..share.pairing import NOT_AN_INVITE
+
+            self.error.emit(NOT_AN_INVITE)
+            return False
+        if parsed.kind == invite.KIND_FRIENDS:
+            # A movie night on a friend's PC, which lets in only its friends:
+            # said now, before anything connects, if its PC is nobody's here.
+            from ..share import nights
+
+            friend = nights.host_friend(parsed.pin)
+            if friend is None:
+                self.error.emit(nights.NOT_THEIR_FRIEND)
+                return False
+            parsed = nights.guest_invite(parsed, friend)
         self._connect(parsed)
         return True
 
@@ -1027,7 +1089,24 @@ class PartySession(QObject):
     def _connect(self, parsed) -> None:
         self._generation += 1
         me = self.me or _people.me()
-        client = sync.Client(me, on_event=self._sync_events(self._generation))
+        # A movie night on a friend's PC: reached with this install's
+        # certificate shown, which is what lets a friend in, and called theirs
+        # (the room has nobody of that PC's in it to be named after).
+        self._guest_connect, self._friend_host = None, None
+        from . import invite
+
+        if parsed.kind == invite.KIND_FRIENDS:
+            from ..share import nights
+
+            friend = nights.host_friend(parsed.pin)
+            self._guest_connect = nights.guest_connect()
+            self._friend_host = friend["name"] if friend is not None else None
+            # Theirs to pass on, to that friend's other friends: nobody hosts it
+            # on this side to have a code to show, so the one joined with is it.
+            self._invite_code = invite.encode(parsed)
+            self._invite_link = invite.web_link(parsed)
+        client = sync.Client(me, on_event=self._sync_events(self._generation),
+                             connect=self._guest_connect)
         self._role = "guest"
         self._phase = "joining"
         self._room = client
@@ -1041,7 +1120,7 @@ class PartySession(QObject):
         from .guest_proxy import GuestProxy      # tls is imported by now: the Client's thread did
 
         self._proxy = GuestProxy(self._invite, address=client.address,
-                                 host_name=client.host.name if client.host else None)
+                                 host_name=self.host_name or None, connect=self._guest_connect)
         self._proxy.start()
         self._media = dict(client.state.media or {})
         self._party_id = client.party_id
@@ -1054,6 +1133,12 @@ class PartySession(QObject):
         back, self._rejoining = self._rejoining, False
         host = self.host_name or "the host"
         words = f"You're back in {host}'s movie night" if back else f"You joined {host}'s movie night"
+        if not back and self._friend_host and self.state is not None and not self.state.playing:
+            # A movie night on a friend's PC, still where it began: nobody at
+            # that PC will press play, so whoever is in says when (the code to
+            # pass on is in this menu, and in the Join panel).
+            words = (f"Movie night on {host}'s PC. Send the code to {host}'s friends, "
+                     "and press play when they're in.")
         self.message.emit(words)
         self.changed.emit()
         self._attach()
@@ -1467,6 +1552,13 @@ class PartySession(QObject):
             self._player.party_offer(quality, why)
 
     def _on_ended(self, reason: str) -> None:
+        if self._phase == "joining" and self._friend_host and reason == sync.TURNED_DOWN:
+            # A friend's PC that closed the door during the handshake: it does
+            # not know this install's certificate any more (it removed us). Not
+            # "an earlier movie night's code", which is what it means elsewhere.
+            from ..share import nights
+
+            reason = nights.NOT_LET_IN.format(name=self._friend_host)
         if self._phase in ("joining", "starting"):
             if self._rejoining:
                 self._rejoin_failed(reason)
@@ -1546,6 +1638,7 @@ class PartySession(QObject):
             self._save_progress()
         self._stop_follower()
         role, room, server, mapping, proxy = self._role, self._room, self._server, self._mapping, self._proxy
+        borrowed = self._borrowed
         back = self._way_back
         back = (back[0], back[1], self._stream_quality) if way_back and back is not None else None
         rejoining = self._rejoining
@@ -1562,7 +1655,8 @@ class PartySession(QObject):
                 player.set_party(None)
         self._reset_state()
         self._way_back = back
-        self._in_background(lambda: _stop_everything(role, room, server, mapping, proxy))
+        self._in_background(lambda: _stop_everything(role, room, server, mapping, proxy,
+                                                     borrowed=borrowed))
         self.changed.emit()
         if failed:
             self.error.emit(reason)
@@ -1579,6 +1673,7 @@ class PartySession(QObject):
             self._save_progress()
         self._stop_follower()
         role, room, server, mapping, proxy = self._role, self._room, self._server, self._mapping, self._proxy
+        borrowed = self._borrowed
         self._generation += 1
         self._save_timer.stop()
         self._renew_timer.stop()
@@ -1586,7 +1681,7 @@ class PartySession(QObject):
             self._player.set_party(None)
         self._reset_state()
         self._way_back = None
-        _stop_everything(role, room, server, mapping, proxy, quick=True)
+        _stop_everything(role, room, server, mapping, proxy, quick=True, borrowed=borrowed)
         self.ended.emit("")
 
     def _stop_follower(self) -> None:
@@ -1703,43 +1798,34 @@ def _whose(host: str | None) -> str:
     return f"{host}'s movie night" if host else "the movie night"
 
 
-def _media_for(item: MediaItem, me: Person, default: str, transcodes: bool) -> dict:
-    """What the room says it is watching. Plain values only (sync.clean_media).
+# The room's description of its film lives in media.py, which the Mistery with
+# no window can import too (app/share/nights.py); the old name stays for callers.
+from .media import media_for as _media_for  # noqa: E402,F401
 
-    "mbps" is the original's own average rate, so a guest whose stream keeps
-    stalling can be offered a stream that is really lighter than it."""
-    from . import transcode
-
-    show_title = ""
-    if item.is_episode and item.show_id:
-        row = db.get_show(item.show_id)
-        show_title = str(row["title"] or "") if row is not None else ""
-    if item.is_episode:
-        name = f"{item.code} · {item.title}".strip(" ·") if item.code else item.title
-        title = f"{show_title} — {name}" if show_title else name
-    else:
-        title = item.title or Path(item.path).stem
-    return {"key": f"{me.id}:{item.id}", "title": title, "duration": float(item.duration or 0) or None,
-            "kind": item.kind, "quality": default, "transcode": bool(transcodes),
-            "fps": float(item.fps) if item.fps else None, "show": show_title, "code": item.code,
-            "name": item.title, "year": int(item.year) if item.year else None,
-            "mbps": transcode.per_friend_mbps(item.size, item.duration)}
 
 
 def _dismantle(made: dict) -> None:
     """A start that failed or was abandoned: everything it made, taken apart."""
-    _stop_everything("host", made.get("hub"), made.get("server"), made.get("mapping"), None)
+    _stop_everything("host", made.get("hub"), made.get("server"), made.get("mapping"), None,
+                     borrowed=bool(made.get("borrowed")))
 
 
-def _stop_everything(role, room, server, mapping, proxy, quick: bool = False) -> None:
+def _stop_everything(role, room, server, mapping, proxy, quick: bool = False,
+                     borrowed: bool = False) -> None:
     """In the order sync.Hub asks for: the room first (every guest is told), then
-    the listener, then the router. Blocking; a worker thread's, or shutdown's."""
+    the listener, then the router. Blocking; a worker thread's, or shutdown's.
+
+    borrowed: the listener is library sharing's, and goes back to it still
+    open, with its friends' streams untouched. One of the movie night's own is
+    closed, and if sharing wanted the port meanwhile, it gets it now."""
     try:
         if role == "host":
             if room is not None:
                 room.end()
                 room.wait_closed(1.5 if quick else 3.0)
-            if server is not None:
+            if server is not None and borrowed:
+                server.end_party()
+            elif server is not None:
                 server.stop()
             from . import upnp
 
@@ -1751,6 +1837,14 @@ def _stop_everything(role, room, server, mapping, proxy, quick: bool = False) ->
                 # have made it all the same; now is as good a time as the next
                 # start to take it off. Forwards still in use are left alone.
                 upnp.cleanup_stale()
+            if server is not None and not borrowed and not quick:
+                # The port is free again, and the router's forward for it gone
+                # (sharing asks for its own; closing ours after that would have
+                # taken sharing's with it). A friend added during the movie
+                # night, say, left sharing waiting for exactly this.
+                from ..share import sharer as share_sharer
+
+                share_sharer.start_if_wanted()
         else:
             if room is not None:
                 room.leave()

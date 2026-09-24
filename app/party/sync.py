@@ -1179,16 +1179,22 @@ class Hub:
     def __init__(self, me: Person | None = None, *, party_id: str | None = None,
                  media: dict | None = None, position: float = 0.0, playing: bool = False,
                  clock: Callable[[], float] = now,
-                 on_event: Callable[[Event], None] | None = None) -> None:
+                 on_event: Callable[[Event], None] | None = None,
+                 present: bool = True) -> None:
         self.me = me if me is not None else _people.me()
         self.party_id = party_id if isinstance(party_id, str) and _PARTY_ID_RE.match(party_id) \
             else uuid.uuid4().hex
         self._clock = clock
         self._events = _Events(on_event)
+        # `present` False: a room on a PC where nobody is watching (a friend's
+        # movie night on this PC's film, app/share/nights.py). The host's seat
+        # still holds the room's clock, but it is nobody: not in `people`, not
+        # among who came, and no guest's name is changed to make way for it.
+        self.present = bool(present)
         t = clock()
         self._host = _Seat(None, t, self.me)
         self._seats: list[_Seat] = [self._host]
-        self._came: dict[str, str] = {self.me.id: self.me.name}
+        self._came: dict[str, str] = {self.me.id: self.me.name} if self.present else {}
         state = RoomState(media=clean_media(media), position=_position(float(position)), at=t,
                           by=self.me.id, cause="start")
         self.state = state.play(t, LEAD_MIN, self.me.id, cause="start") if playing else state
@@ -1452,7 +1458,7 @@ class Hub:
                                                           "from somewhere else."})
             replaced.link.begin_close(t + CLOSE_WAIT)
         taken = {s.person.name.casefold() for s in self._seats
-                 if s.phase == "in" and s.person and s is not seat}
+                 if s.phase == "in" and s.person and s is not seat and self._counts(s)}
         seat.person = Person(pid, unique_name(name, taken))
         seat.phase = "in"
         seat.app = app
@@ -1855,6 +1861,11 @@ class Hub:
                 link.shut_when_sent()
             self._loop.update_interest(link, seat)
 
+    def _counts(self, seat: _Seat) -> bool:
+        """Whether a seat is somebody: every guest's is, and the host's unless
+        nobody is watching on the host's PC (`present`)."""
+        return self.present or seat is not self._host
+
     def _refresh_people(self) -> None:
         self.people = [{
             "id": seat.person.id,
@@ -1864,7 +1875,8 @@ class Hub:
             "slow": seat.slow,
             "drift": None if seat.drift is None else round(seat.drift, 3),
             "rtt": None if seat.rtt is None else round(seat.rtt, 4),
-        } for seat in self._seats if seat.phase == "in" and seat.person is not None]
+        } for seat in self._seats
+            if seat.phase == "in" and seat.person is not None and self._counts(seat)]
 
     def _names(self) -> dict[str, str]:
         return {p["id"]: p["name"] for p in self.people} | \
@@ -2018,9 +2030,14 @@ class Client:
     wan_timeout = 6.0
 
     def __init__(self, me: Person | None = None, *, clock: Callable[[], float] = now,
-                 on_event: Callable[[Event], None] | None = None) -> None:
+                 on_event: Callable[[Event], None] | None = None,
+                 connect: Callable | None = None) -> None:
         self.me = me if me is not None else _people.me()
         self._clock = clock
+        # How to reach the host: tls.connect, or for a movie night on a friend's
+        # PC, which lets in only its friends, this install's own certificate
+        # shown as well (share identity's connect, app/share/nights.py).
+        self._connect_to = connect
         self._events = _Events(on_event)
         self.clock = ClockSync()
         self.state = RoomState()
@@ -2165,7 +2182,7 @@ class Client:
                 continue
             self._events.emit(Event("connecting", text, {"step": step, "address": address}))
             try:
-                sock = tls.connect(address, port, invite.pin, timeout)
+                sock = (self._connect_to or tls.connect)(address, port, invite.pin, timeout)
             except tls.PinMismatch:
                 last, offline, other_certificate = "not them", False, True
                 _log.info("movie night: %s:%s answered with another certificate", address, port)

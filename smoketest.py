@@ -431,7 +431,8 @@ def main() -> int:
     # this loop would still pass with Playlists showing Search.
     expected = {"Home": window.home, "Movies": window.movies, "Shows": window.shows,
                 "Music": window.music_page, "Playlists": window.playlists_page,
-                "Search": window.search, "Settings": window.settings_page}
+                "Friends": window.friends_page, "Search": window.search,
+                "Settings": window.settings_page}
     for index, (_icon, name) in enumerate(main_window._NAV):
         window._on_nav(index)
         pump(0.45)

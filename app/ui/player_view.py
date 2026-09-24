@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -12,7 +13,9 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from .. import db
 from ..config import settings
 from ..models import MediaItem
-from ..discord_presence import DiscordPresence, asset_key as discord_asset_key
+from ..discord_presence import (
+    DiscordPresence, asset_key as discord_asset_key, public_image_url,
+)
 from ..player.audio_filters import build_chain
 from ..player.mpv_process import MpvProcess, MpvUnavailable, quality_preset
 from ..util import fmt_clock
@@ -141,6 +144,12 @@ class PlayerView(QWidget):
         self._party_way_back = None
         self._leave_armed_until = 0.0
         self._notice_sticky = False
+        # A friend's film, streamed from their PC (app/share/playback.py): the
+        # Stream that holds it open, or None. Like a movie night guest's title
+        # it is in no library of this PC's, so there is no file, play count,
+        # show memory or resume point here: where you got to goes to
+        # friend_progress instead, and the stream closes with the player.
+        self._friend = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -343,6 +352,7 @@ class PlayerView(QWidget):
         it is saved as this person's own.
         """
         self.save_progress()
+        self._close_friend()                # a friend's film before this one
 
         party = self._party
         if party is not None and not party.owns(item):
@@ -448,6 +458,123 @@ class PlayerView(QWidget):
         self.overlay.wake()
         return True
 
+    def play_friend(self, item: MediaItem, stream, start_at: float = 0.0,
+                    subtitle: str = "") -> bool:
+        """Play a friend's film or episode, streamed from their PC.
+
+        `stream` holds it open (app/share/playback.py, already opened: mpv reads
+        its local address); `item` is what to call it, made from their
+        catalogue, with no file and no id of this library's. So none of what
+        play() does with a library row happens here: no file check, no play
+        count, no saved tracks, no show memory or Up Next. Where you got to goes
+        to friend_progress (save_progress), and the stream closes with the
+        player (_end_session). False, with the stream closed, when mpv cannot
+        start.
+        """
+        self.save_progress()
+        self._close_friend()
+        if self._party is not None:
+            # A friend's film is nobody's movie night: one on screen ends first,
+            # as it does for anything else played meanwhile.
+            self._drop_party()
+        if not self._ensure_mpv():
+            threading.Thread(target=stream.close, name="share-stream-close", daemon=True).start()
+            return False
+
+        self._friend = stream
+        self._item = item
+        self._ending = False
+        self._party_item = False
+        self._party_over = ""
+        self._party_way_back = None
+        self._duration = stream.duration or item.duration or 0.0
+        self._position = 0.0
+        self._pending_start = max(0.0, float(start_at or 0.0))
+        self.overlay.set_title(item.title, subtitle)
+        self.overlay.set_duration(self._duration)
+        self.overlay.set_position(self._pending_start)
+        self.overlay.set_paused(False)
+        self.overlay.set_chapters([])
+        self.overlay.set_tracks([], [])
+        self.overlay.set_thumbnails(None)
+        self.overlay.set_boost(bool(settings.get("dialogue_boost")))
+        self._line_up, self._line_index = [], 0
+        self._refresh_nav()
+        self.overlay.set_autoplay(bool(settings.get("autoplay_next", True)))
+        self.overlay.set_quality(quality_preset(settings.get("video_quality", "balanced")), "")
+        self._intro_skipped = False
+        self._next_card_shown = False
+        self._next_card_declined = False
+        self.overlay.next_card.hide_quietly()
+        self.overlay.show_skip_pill(False)
+        self._show_id = None
+        self._load_tv_model()
+        self.overlay.clear_message()
+        self.overlay.hide_party_card()
+        self._opening_timer.start()
+        self._awaiting_file = True
+        self.mpv.load(stream.media_url(), start_at=self._pending_start, options={})
+        self._active = True
+        self._save_timer.start()
+        self._geometry_timer.start()
+        self._sync_overlay()
+        self._show_party()
+        self.overlay.show()
+        self.overlay.wake()
+        return True
+
+    def _close_friend(self) -> None:
+        """Let a friend's stream go: off Qt's thread, since it says goodbye to
+        their PC on the way out."""
+        stream, self._friend = self._friend, None
+        if stream is not None:
+            threading.Thread(target=stream.close, name="share-stream-close", daemon=True).start()
+
+    def _add_friend_subtitles(self) -> None:
+        """The subtitle files beside their film, added (not chosen: turning them
+        on stays this person's own choice, as for a movie night guest)."""
+        stream = self._friend
+        if stream is None:
+            return
+        for sub in stream.subtitles[:32]:
+            if not isinstance(sub, dict) or not isinstance(sub.get("n"), int):
+                continue
+            url = stream.subtitle_url(sub["n"])
+            if url:
+                self.mpv.command("sub-add", url, "auto", str(sub.get("title") or "External")[:80],
+                                 str(sub.get("lang") or "")[:3])
+
+    def _save_friend_progress(self, watched: bool | None = None) -> None:
+        """Where you got to in a friend's film, kept on this PC: never in this
+        library's progress, and never sent to them."""
+        stream = self._friend
+        if stream is None:
+            return
+        duration = self._duration or 0.0
+        if watched is None and duration:
+            threshold = float(settings.get("watched_threshold", 0.92))
+            watched = True if self._position >= duration * threshold else None
+        db.save_friend_progress(stream.friend_id, stream.kind, stream.remote_id,
+                                0.0 if watched else self._position,
+                                duration=duration or None, watched=watched)
+        self._last_saved = time.monotonic()
+        self.progress_changed.emit()
+
+    def _friend_end_of_file(self, reason: str) -> None:
+        """The end of a friend's film: watched, and the player closes, as one of
+        your own does with nothing after it. An error is their PC or the way to
+        it, said in the stream's own words when it has any."""
+        self._ending = True
+        if reason == "error":
+            self._opening_timer.stop()          # file-loaded will never come
+            proxy = getattr(self._friend, "proxy", None)
+            said = proxy.last_error if proxy is not None and proxy.last_error else ""
+            self.overlay.show_message(said or "This couldn't be played from their PC.")
+            self.overlay.wake()
+            return
+        self._save_friend_progress(watched=True)
+        self.stop_and_close()
+
     def _launch_settings(self) -> tuple:
         return tuple(settings.get(key) for key in _LAUNCH_SETTINGS)
 
@@ -545,6 +672,8 @@ class PlayerView(QWidget):
         self._presence_timer.start()        # once duration is known
         if self._party is not None:
             self._party.file_loaded()       # a guest's subtitle files, added again
+        if self._friend is not None:
+            self._add_friend_subtitles()
 
     # --- TV: intro / credits / subtitle memory -------------------------------
 
@@ -794,6 +923,9 @@ class PlayerView(QWidget):
             # movie night's film is the room's, and what follows is the host's.
             self._party_end_of_file(reason)
             return
+        if self._friend is not None:
+            self._friend_end_of_file(reason)
+            return
         self._ending = True
 
         if reason == "error":
@@ -847,6 +979,7 @@ class PlayerView(QWidget):
         hidden overlay, then started the next episode with nobody in the player.
         """
         self.save_progress()
+        self._close_friend()
         self._active = False
         self._awaiting_file = False
         self._save_timer.stop()
@@ -938,15 +1071,50 @@ class PlayerView(QWidget):
                 title = item.title
                 subtitle = str(item.year) if item.year else ""
             remaining = max(0.0, (self._duration or 0) - self._position)
-            # The poster is per show / per film, so the key comes from that
-            # title rather than the episode's. Falls back to the app icon when
-            # nothing matching has been uploaded.
+            # The picture is per show / per film, never per episode. A guest at
+            # someone else's movie night is playing the host's file, and the
+            # row this PC has open is not it, so only the title is theirs.
+            local = item if party is None or party.role != "guest" else None
             self.presence.set_watching(
                 title, subtitle, remaining, self._paused, title,
-                image_key=discord_asset_key(title),
+                image=self._presence_image(local, title),
             )
         except Exception:
             pass
+
+    def _presence_image(self, item: MediaItem | None, title: str) -> str:
+        """The picture for the Discord card: its public address if it has one.
+
+        Mistery downloads posters from TMDB, TVmaze and Wikipedia, all of which
+        serve them from public URLs, and Discord will fetch such a URL itself.
+        So for anything with online metadata there is nothing to export and
+        nothing to upload — the URL goes straight on the card.
+
+        Art with no public address falls back to the name of an uploaded image
+        (the Export posters button in Settings builds those): a film matched to
+        nothing online, and anything whose art Mistery composed out of the
+        film's own frames, which exists only on this PC.
+
+        The URL is checked here as well as in _resolve_art, on purpose. A URL
+        that fails the check is not an asset name either, so leaving it to the
+        worker would cost the uploaded poster too and show the bare icon.
+
+        db.art_url is one indexed lookup by id, on the GUI thread; presence is
+        published on play, pause, seek and each new episode, so it happens a
+        handful of times an hour. Anything at all wrong with it — a missing
+        row, a column that isn't there yet — falls back to the name instead of
+        disturbing playback.
+        """
+        url = None
+        if item is not None:
+            try:
+                if item.is_episode and item.show_id:
+                    url = db.art_url("show", item.show_id)
+                else:
+                    url = db.art_url("movie", item.id)
+            except Exception:           # presence is never allowed to matter
+                url = None
+        return public_image_url(url or "") or discord_asset_key(title)
 
     def _on_mpv_exited(self, code: int) -> None:
         """mpv died on its own — don't leave the player sitting on a dead frame."""
@@ -1113,6 +1281,9 @@ class PlayerView(QWidget):
         # A movie night's title is the party's: its place is kept in
         # party_progress by the session, never here, before, during or after.
         if item is None or self._party_item or self._position <= 0:
+            return
+        if self._friend is not None:
+            self._save_friend_progress()
             return
         self._remember_show_tracks()
         duration = self._duration or item.duration or 0.0

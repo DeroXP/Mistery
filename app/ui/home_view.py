@@ -12,6 +12,7 @@ from .. import db
 from ..config import settings
 from ..models import MediaItem, ShowItem
 from ..util import fmt_clock, progress_fraction
+from .friend_library_view import FriendItem, friend_continue_items, friend_night_item
 from .party_dialog import and_list, when_text
 from .theme import C
 from .widgets.artview import ArtView
@@ -49,11 +50,14 @@ class PartyCard(QFrame):
     """One movie night on Home: what it watched, who came, where it got to.
 
     The host can Continue it: same party, same place, and a fresh code for the
-    friends. A guest's card says who can, because the film is on their PC.
+    friends. A guest's card says who can, because the film is on their PC. One
+    that a friend's PC held for its friends (Watch together, app/share/nights.py)
+    can be asked of that PC again: Watch together again, from where it got to.
     """
 
     continue_requested = Signal(object)         # the party's newest party_progress row
     forget_requested = Signal(str)              # party_id
+    together_requested = Signal(object, object)     # the friend's film (a FriendItem), the row
 
     def __init__(self, row, me: str, parent=None) -> None:
         super().__init__(parent)
@@ -72,8 +76,26 @@ class PartyCard(QFrame):
         fresh = db.get_media(int(media_id)) if row["role"] == "host" and media_id else None
         item = MediaItem.from_row(fresh) if fresh is not None and not fresh["missing"] else None
         self.item = item
+
+        members = people.parse_members(row["members"])
+        host_id = str(row["media_key"] or "").split(":", 1)[0]
+        host = next((p.name for p in members if p.id == host_id), "")
+        others = [p.name for p in members if p.id != me and p.id != host_id]
+        # Held by a friend's PC for its friends: nobody of that PC's was in the
+        # room, so its owner is not among who came. The film is theirs to lend
+        # still, while their catalogue has it, so their PC can be asked again.
+        self.friend = None
+        self.friend_item = None
+        if row["role"] != "host" and host_id and not host:
+            self.friend = db.friend_by_person(host_id)
+            if self.friend is not None:
+                self.friend_item = friend_night_item(int(self.friend["id"]), row["media_key"])
+
         self.art = _PartyArt()
-        self.art.set_art(item.wide_art if item else None, row["title"] or "Movie night")
+        if self.friend_item is not None:
+            self.art.set_art(self.friend_item.wide_art, row["title"] or "Movie night", framed=True)
+        else:
+            self.art.set_art(item.wide_art if item else None, row["title"] or "Movie night")
         self.art.fraction = progress_fraction(row["position"], row["duration"])
         layout.addWidget(self.art, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -84,12 +106,11 @@ class PartyCard(QFrame):
         self.title.setToolTip(row["title"] or "")
         text.addWidget(self.title)
 
-        members = people.parse_members(row["members"])
-        host_id = str(row["media_key"] or "").split(":", 1)[0]
-        host = next((p.name for p in members if p.id == host_id), "")
-        others = [p.name for p in members if p.id != me and p.id != host_id]
         if row["role"] == "host":
             who = f"With {and_list(others)}" if others else "Nobody else joined"
+        elif self.friend is not None:
+            who = f"From {self.friend['name']}'s library" + (
+                f", with {and_list(others)}" if others else "")
         else:
             who = (f"{host}'s movie night" if host else "A friend's movie night") + (
                 f", with {and_list(others)}" if others else "")
@@ -117,12 +138,29 @@ class PartyCard(QFrame):
                                    "a new code.")
             self.action.clicked.connect(lambda: self.continue_requested.emit(self.row))
             text.addWidget(self.action, 0, Qt.AlignmentFlag.AlignLeft)
+        elif self.friend_item is not None:
+            name = self.friend["name"]
+            self.action = QPushButton("Watch together again")
+            self.action.setObjectName("Chip")
+            self.action.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.action.setToolTip(f"Ask {name}'s PC to start this movie night again where it got "
+                                   f"to. There's a new code to pass on to {name}'s friends.")
+            self.action.clicked.connect(self._together)
+            text.addWidget(self.action, 0, Qt.AlignmentFlag.AlignLeft)
         else:
-            note = QLabel("The file is no longer in your library" if row["role"] == "host"
-                          else f"{host or 'The host'} can continue it")
+            if row["role"] == "host":
+                words = "The file is no longer in your library"
+            elif self.friend is not None:
+                words = f"It is no longer in {self.friend['name']}'s library"
+            else:
+                words = f"{host or 'The host'} can continue it"
+            note = QLabel(words)
             note.setStyleSheet(f"color: {C.TEXT_FAINT}; font-size: 8.5pt;")
             text.addWidget(note)
         layout.addLayout(text, 1)
+
+    def _together(self) -> None:
+        self.together_requested.emit(self.friend_item, self.row)
 
     def showEvent(self, event) -> None:
         """Titles are cut to fit here, where the labels have the font they
@@ -137,7 +175,10 @@ class PartyCard(QFrame):
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
         menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        if self.action is not None:
+        if self.friend_item is not None:
+            menu.addAction("Watch together again", self._together)
+            menu.addSeparator()
+        elif self.action is not None:
             menu.addAction("Continue movie night", lambda: self.continue_requested.emit(self.row))
             menu.addSeparator()
         menu.addAction("Remove from Movie nights",
@@ -155,6 +196,7 @@ class MovieNights(QWidget):
     continue_requested = Signal(object)         # a party_progress row
     forget_requested = Signal(str)
     join_requested = Signal()
+    together_requested = Signal(object, object)     # a friend's film (FriendItem), a party_progress row
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -208,6 +250,7 @@ class MovieNights(QWidget):
             card = PartyCard(row, me)
             card.continue_requested.connect(self.continue_requested.emit)
             card.forget_requested.connect(self.forget_requested.emit)
+            card.together_requested.connect(self.together_requested.emit)
             self.flow.addWidget(card)
             self.cards.append(card)
         self.empty.setVisible(not newest)
@@ -223,6 +266,12 @@ class HomeView(QWidget):
     open_media = Signal(object)
     open_show = Signal(object)
     add_folder_requested = Signal()
+    # A friend's film or episode in Continue Watching (friend_library_view.
+    # FriendItem): resumed from their PC, or opened in their library. Never
+    # through the signals above, which all mean something of this library's.
+    friend_play_requested = Signal(object)
+    friend_open_requested = Signal(object)
+    friend_together_requested = Signal(object)      # its menu's Watch together (app/share/nights.py)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -282,14 +331,29 @@ class HomeView(QWidget):
 
     def _connect(self, section) -> None:
         section.item_clicked.connect(self._on_item_clicked)
-        section.item_play_requested.connect(self.play_requested.emit)
-        section.item_action.connect(self.item_action.emit)
+        section.item_play_requested.connect(self._on_play)
+        section.item_action.connect(self._on_action)
 
     def _on_item_clicked(self, item) -> None:
-        if isinstance(item, ShowItem):
+        if isinstance(item, FriendItem):
+            self.friend_open_requested.emit(item)
+        elif isinstance(item, ShowItem):
             self.open_show.emit(item)
         else:
             self.open_media.emit(item)
+
+    def _on_play(self, item) -> None:
+        if isinstance(item, FriendItem):
+            self.friend_play_requested.emit(item)
+        else:
+            self.play_requested.emit(item)
+
+    def _on_action(self, action: str, item) -> None:
+        if isinstance(item, FriendItem):
+            {"play": self.friend_play_requested,
+             "together": self.friend_together_requested}.get(action, self.friend_open_requested).emit(item)
+        else:
+            self.item_action.emit(action, item)
 
     def _build_empty_state(self) -> QWidget:
         panel = QWidget()
@@ -323,12 +387,14 @@ class HomeView(QWidget):
     def reload(self) -> None:
         movies = [MediaItem.from_row(r) for r in db.movies()]
         shows = [ShowItem.from_row(r) for r in db.all_shows()]
-        resume = [
-            MediaItem.from_row(r)
-            for r in db.continue_watching(
-                limit=16, min_seconds=float(settings.get("resume_min_seconds", 30))
-            )
-        ]
+        # Yours and your friends' in one row, by when you last watched each:
+        # a friend's film you stopped halfway is resumed from here like yours.
+        min_seconds = float(settings.get("resume_min_seconds", 30))
+        started = [(float(r["updated_at"] or 0.0), MediaItem.from_row(r))
+                   for r in db.continue_watching(limit=16, min_seconds=min_seconds)]
+        started += friend_continue_items(limit=16, min_seconds=min_seconds)
+        started.sort(key=lambda pair: pair[0], reverse=True)
+        resume = [item for _when, item in started[:16]]
 
         self.hero.set_item(MediaItem.from_row(db.hero_candidate()))
         self.continue_row.set_items(resume)

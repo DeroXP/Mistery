@@ -146,8 +146,12 @@ class GuestProxy:
     resume_waits = (0.2, 0.5, 1.0, 2.0, 4.0)
     busy_waits = (0.5, 1.0, 2.0, 2.0, 2.0)
 
-    def __init__(self, invite, address: str | None = None, host_name: str | None = None) -> None:
+    def __init__(self, invite, address: str | None = None, host_name: str | None = None,
+                 connect=None) -> None:
         self._invite = invite
+        # tls.connect, or with this install's certificate shown too, for a movie
+        # night on a friend's PC that lets in only its friends (sync.Client's too).
+        self._connect_to = connect
         token = invite.token
         self._token_hex = token.hex() if isinstance(token, (bytes, bytearray)) else str(token).lower()
         self.address = address
@@ -363,7 +367,7 @@ class GuestProxy:
             if self._stopping.is_set():
                 return None
             try:
-                sock = tls.connect(address, port, self._invite.pin, timeout)
+                sock = (self._connect_to or tls.connect)(address, port, self._invite.pin, timeout)
             except tls.PinMismatch:
                 offline = False
                 self.last_error = ("The host's certificate does not match the invite. "

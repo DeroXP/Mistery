@@ -348,7 +348,10 @@ it), asks the router to forward it (UPnP), makes a TLS certificate for this
 evening only, and shows an invite code to paste into Discord or a text. Friends
 press **Movie night** at the top of their Mistery and paste it. The whole
 message is fine: the code is found inside it, and a typo is caught by its
-checksum before anything connects.
+checksum before anything connects. **Copy link** gives the code as a link
+instead, which chats make clickable: it opens a page on Mistery's website that
+opens their Mistery's Join panel with the code filled in. The code rides after
+the `#` in the link, which a browser never sends, so the website never sees it.
 
 **Staying together.** Anyone can play, pause or seek. The host's Mistery keeps
 the one clock everyone follows. Small drift is corrected by nudging playback
@@ -394,6 +397,69 @@ gets a bare 404 or a closed connection. Only the one file being watched, and the
 subtitle files named after it, can be reached: never the library, never any
 other file. When the night ends, the port closes and the router's mapping is
 removed. After a crash, that happens at the next start.
+
+With library sharing on (below), the port belongs to sharing and stays open.
+A movie night then runs on sharing's listener instead of opening its own, using
+this PC's lasting certificate rather than one made for the evening. The code's
+rules are unchanged: its guests get the one film, and when the night ends its
+code stops working while friends carry on being served.
+
+## Friends
+
+Share your library with friends who have Mistery, and watch theirs: films,
+shows and music, streamed straight from one PC to the other. Their films and
+songs are never copied to your PC, there is no account, and no server sits in
+between.
+
+**Adding a friend.** Open **Friends** in the top bar. Either press **Get my
+code** and send the code, or paste the code a friend sent under **Add theirs**.
+One code is enough, sent either way. It looks like a movie night invite with a
+2 in front, and pasting one in the wrong box is named rather than refused as a
+typo. A code adds one friend, works for a day, and then it's spent. Sharing
+switches itself on with the first friend. **Copy link** sends it as a link, as
+for a movie night: a friend who clicks it gets their Friends page with the code
+already in the box, and adding you is still their own press of **Add friend**.
+
+**Their library.** **Browse** on a friend's row shows their films, shows and
+albums. Their posters arrive the first time they come on screen, and are kept.
+Everything they share is kept too, so you can browse it while their PC is off.
+Opening it asks their PC what has changed, and only that is sent. Play works
+while their PC is on: the film comes from their disk, with the subtitle files
+beside it. Your place in it is kept on your PC, never in your own library's
+watch history, and never on theirs.
+
+**Watch together.** On a friend's film, or an episode's menu, **Watch together**
+starts a movie night of it on their PC, even with their Mistery closed. You
+join it at once, paused at the start, and the code is yours to pass on: in the
+Movie night panel and the player's menu. The film goes from their PC straight to
+each of you, and only their friends get in. Their PC checks each person's
+certificate at the door, so a code passed further opens nothing. It ends a couple
+of minutes after the last of you leaves. Its card in **Movie nights** on Home
+then has **Watch together again**: their PC starts it where it got to, with a
+new code to pass on. On the PC it's on, quitting Mistery while friends are
+watching asks first, and the PC stays awake meanwhile.
+
+**Their PC off, or out of reach.** The page says so, in words: off or asleep,
+sharing switched off, or (from outside their home) their router not forwarding
+the port. The same port as movie night, so one forward does both.
+
+**While Mistery is closed.** With *Keep sharing while Mistery is closed* ticked
+(the default), a windowless Mistery keeps serving friends from the moment you
+sign in to Windows. It's listed in Task Manager's Startup apps, where you can
+switch it off. It steps aside whenever Mistery itself opens, and for the few
+seconds an update takes, then starts again. While a friend is actually
+watching, it keeps the PC awake, never the screen; that's a box on the Friends
+page too.
+
+**Security.** Each Mistery has a certificate of its own, made once and kept.
+Adding a friend swaps certificates: the code carries this PC's fingerprint and
+a one-time 104-bit secret, and the friend's Mistery checks the fingerprint
+before it sends anything. After that, both ends show their certificates on every
+connection, and neither answers anything whose certificate isn't written down.
+A friend asks for a title by kind and number. Nothing they send is ever turned
+into a path, and they never see where your files are. Each thing they play gets
+its own token, which is handed back when they stop. **Pause** stops serving a
+friend for now. **Remove** forgets them, their library and your place in it.
 
 ## Music
 
@@ -766,8 +832,10 @@ there would leave a completed song stuck as "downloading" for good.
 
 ## Discord Rich Presence
 
-Settings → *Discord Rich Presence* shows what you're watching on your profile,
-with Discord's own countdown to the end of the episode.
+Settings → *Discord Rich Presence* shows what you're watching or listening to
+on your profile: *Watching Mistery* with the film and Discord's own countdown to
+the end, or *Listening to Mistery* with the song, the artist and the album. A
+film playing wins over music.
 
 Discord requires every app to have its own application registered, so this needs
 a one-minute setup: [discord.com/developers/applications](https://discord.com/developers/applications)
@@ -777,35 +845,47 @@ heading. For the fallback icon, upload an image named `mistery` under Rich
 Presence → Art Assets. There is a *Hide titles* option if you'd rather it just
 say something is playing.
 
-### Per-title artwork
+### The picture on the card
 
-`large_image` takes an **asset key** — the name of an image uploaded to your
-application. Discord cannot read a file from disk, and Mistery uploads nothing
-anywhere, so a poster has to be one you have given Discord yourself.
+**Most films and shows need nothing.** Their artwork came from TMDB, TVmaze or
+Wikipedia, which are public, and Mistery keeps each picture's web address beside
+the downloaded file. The card hands Discord that address and Discord fetches the
+poster itself: no upload, no token, nothing of your account involved. Discord
+documents this for activity images ("specify the URL as the field's value"), and
+its own example is a music card with an album-cover URL.
 
-**Settings → Export posters for Discord** builds one card per show and film,
-already named as the key the player will ask for, and opens the folder. Drop it
-into Rich Presence → Art Assets and each title gets its own image.
+Two kinds of picture have no web address, and those still go through Discord's
+Art Assets by hand:
 
-- Cards are **1024x576**, the 16:9 shape Discord requires. Nothing in a film
-  library is that shape, so they are composed rather than copied: the poster
-  whole in the centre over a blurred, darkened frame taken from the backdrop.
-  Cropping a 2:3 poster to 16:9 would cut away the faces and the title, and at
-  the size Discord draws this a bare film still is usually unrecognisable
-- Keys come from the title (`Harbor Lights` → `harbor-lights`), truncated to
-  Discord's 32-character limit — so the file you upload and the key the player
-  asks for agree without anything to configure
-- The export **clears its own folder first**, so a renamed title cannot leave
-  art behind under its old key and get uploaded by mistake
-- An asset key Discord does not recognise shows **no image at all** rather than
-  falling back, so on connect Mistery reads the application's asset list (a
-  public endpoint — no token, no access to your account) and uses a per-title
-  key only once it is confirmed present. Anything not uploaded falls back to
+- **Album covers**, which come out of the music files themselves.
+- **Films and shows nothing online matched**, whose poster Mistery cut from the
+  film's own frames.
+
+**Settings → Export posters for Discord** writes exactly those, and only the ones
+Discord doesn't already have — it reads the application's list first (a public
+endpoint, no token). Drop the folder into Rich Presence → Art Assets.
+
+- Cards are **1024x576**, the 16:9 shape Discord requires. A 2:3 poster or a
+  square cover goes whole in the centre over a blurred, darkened copy of the
+  backdrop (or of itself). Cropping would cut away the faces and the title
+- A film's name is its title (`Harbor Lights` → `harbor-lights`); an album's is
+  `alb-`, the artist and the title, so two *Greatest Hits* by two artists stay
+  apart, and so does an album named like a film. Names over Discord's 32
+  characters end in a short hash, so two long titles can't collide
+- Discord allows **300** images per application. When the export would pass
+  that, what gets played most goes first and the note says what was left out
+- An image name Discord doesn't have shows **no picture at all**, so Mistery
+  only asks for one once Discord's list confirms it, and reads that list again
+  every ten minutes — an upload shows up without restarting. Anything else gets
   the `mistery` icon
+- An address is sent only if it is public: https, a host the internet can
+  resolve, no login in it, no query string (the one place a key or a signed
+  link would hide), at most 512 characters. A local path never leaves the PC
 
-The `external-assets` API would allow arbitrary image URLs and avoid uploading
-anything, but it requires your Discord user token. That is against Discord's
-terms and is not used here.
+Uploading to Art Assets can't be automated within Discord's rules: there is no
+upload API, and the one the developer portal uses needs your personal account
+token, which Discord treats as a self-bot. So "automatic" here means "not
+needed", not "done for you".
 
 The connection lives on a worker thread and every failure is swallowed — Discord
 being closed, uninstalled, or rejecting the ID can never disturb playback.

@@ -13,6 +13,9 @@ What it does remove: the install folder, the two shortcuts, the scheduled task
 and the Add/Remove Programs entry — and it removes them by reading
 mistery-install.json, which the installer wrote with the exact names it used.
 Guessing at those names is how an uninstaller deletes somebody else's shortcut.
+Two more entries are the app's own, not the installer's (sharing.py): the one
+that starts it at sign-in to serve friends, and the one that makes mistery://
+links open it. They go too, when they point into the folder being removed.
 
 mistery-install.json is read, never obeyed. It is an ordinary file in the
 install folder, so every path out of it is checked against what it claims to
@@ -32,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import arp, task
+from . import arp, sharing, task
 from .setup_common import (APP_EXE_NAME, APP_NAME, CREATE_NO_WINDOW, MARKER_NAME,
                            UNINSTALLER_NAME, InstallError, arp_key, data_dir,
                            desktop_dir, exe_in_use, folder_size, human_size,
@@ -56,6 +59,8 @@ class Plan:
     shortcuts: list[Path] = field(default_factory=list)
     update_task: str | None = None
     arp_key: str = ""
+    sharing_entry: bool = False       # starts this install's Mistery at sign-in to serve friends
+    link_handler: bool = False        # mistery:// links open this install's Mistery
 
 
 @dataclass
@@ -64,6 +69,9 @@ class Removed:
     shortcuts: list[Path] = field(default_factory=list)
     update_task: bool = False
     arp_entry: bool = False
+    sharer_stopped: bool = False
+    sharing_entry: bool = False
+    link_handler: bool = False
     data_dir: bool = False
     left_behind: list[str] = field(default_factory=list)
     seconds: float = 0.0
@@ -117,6 +125,8 @@ def read_plan(install_dir: Path) -> Plan:
         update_task=marker.get("update_task") or (
             task_name() if task.exists(task_name()) else None),
         arp_key=str(marker.get("arp_key") or arp_key()),
+        sharing_entry=sharing.run_entry(install_dir),
+        link_handler=sharing.link_handler(install_dir),
     )
 
 
@@ -154,6 +164,16 @@ def run(plan: Plan, keep_data: bool, report: Report) -> Removed:
     started = time.monotonic()
     out = Removed()
 
+    # The Mistery serving friends with no window is this folder's Mistery.exe
+    # too, and it never quits by itself: ask it to leave first, or the check
+    # below would send the person looking for a window that is not there.
+    if sharing.sharer_pid(plan.install_dir) is not None:
+        report("Stopping sharing with friends", 0.02)
+        stopped = sharing.stop_sharer(plan.install_dir)
+        if stopped is False:
+            raise InstallError(sharing.STOP_FAILED)
+        out.sharer_stopped = bool(stopped)
+
     if exe_in_use(plan.install_dir / APP_EXE_NAME):
         raise InstallError(
             f"Mistery is running from {plan.install_dir}. Close it (check the "
@@ -167,6 +187,18 @@ def run(plan: Plan, keep_data: bool, report: Report) -> Removed:
         out.update_task = task.unregister(plan.update_task)
         if not out.update_task:
             out.left_behind.append(f"the scheduled task {plan.update_task}")
+
+    # Before the files: an entry left behind would start a Mistery.exe that is
+    # not there at the next sign-in, or when a friend's link is clicked.
+    report("Removing sharing at sign-in and mistery:// links", 0.1)
+    entry = sharing.remove_run_entry(plan.install_dir)
+    out.sharing_entry = bool(entry)
+    if entry is False:
+        out.left_behind.append(f"HKCU\\{sharing.run_key()} ({sharing.RUN_VALUE})")
+    handler = sharing.remove_link_handler(plan.install_dir)
+    out.link_handler = bool(handler)
+    if handler is False:
+        out.left_behind.append(f"HKCU\\{sharing.link_key()}")
 
     report("Removing the Start Menu entry", 0.15)
     for link in plan.shortcuts:

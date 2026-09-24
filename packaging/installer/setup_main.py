@@ -347,7 +347,7 @@ class UninstallWindow(Window):
                 self.body, style="Muted.TLabel", wraplength=470, justify="left",
                 text=(f"{plan.data_dir} holds what Mistery has scanned, what "
                       "you have watched and where you stopped, your artwork "
-                      "cache and your TMDB key. Leaving it means a reinstall "
+                      "cache, your friends and your TMDB key. Leaving it means a reinstall "
                       "picks up exactly where this one left off. Unticking "
                       "this deletes all of it, and it cannot be undone.")
             ).grid(row=1, column=0, sticky="w", pady=(2, 8))
@@ -362,6 +362,10 @@ class UninstallWindow(Window):
                         f"{'s' if len(plan.shortcuts) > 1 else ''}")
         if plan.update_task:
             what.append("the hourly update check")
+        if plan.sharing_entry:
+            what.append("sharing with friends from sign-in")
+        if plan.link_handler:
+            what.append("opening Mistery from links")
         what.append("the Add/Remove Programs entry")
         ttk.Label(self.body, style="Muted.TLabel", wraplength=470, justify="left",
                   text="Also removed: " + ", ".join(what) + "."
@@ -522,6 +526,9 @@ def _unattended_uninstall(folder: Path | None, keep_data: bool) -> int:
     print(f"  install folder  {'gone' if removed.install_dir else 'still there'}")
     print(f"  shortcuts       {len(removed.shortcuts)} removed")
     print(f"  update task     {'gone' if removed.update_task else 'not removed'}")
+    print(f"  sharing         {'stopped' if removed.sharer_stopped else 'was not running'}, "
+          f"sign-in entry {'gone' if removed.sharing_entry else 'none of this install'}")
+    print(f"  mistery:// links {'gone' if removed.link_handler else 'none of this install'}")
     print(f"  ARP entry       {'gone' if removed.arp_entry else 'not removed'}")
     print(f"  library data    "
           f"{'deleted' if removed.data_dir else 'kept at ' + str(plan.data_dir)}")

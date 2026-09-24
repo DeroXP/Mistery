@@ -43,6 +43,7 @@ class _BaseCard(QWidget):
 
     ART_W = POSTER_W
     ART_H = POSTER_H
+    FRAMED_ART = False      # a tall picture shown whole rather than cropped (images.framed_pixmap)
 
     def __init__(self, item, parent=None) -> None:
         super().__init__(parent)
@@ -178,7 +179,7 @@ class _BaseCard(QWidget):
         # follows the tile as it grows. Baking it into the pixmap would scale it.
         self._pixmap = art_pixmap(
             path, title, self.ART_W, self.ART_H, 0,
-            self.devicePixelRatioF(), self._on_art_ready,
+            self.devicePixelRatioF(), self._on_art_ready, framed=self.FRAMED_ART,
         )
 
     def _on_art_ready(self, pixmap: QPixmap) -> None:
@@ -476,6 +477,12 @@ def set_extra_actions(container, actions: list[tuple[str, str]]) -> None:
 
 
 def make_card(item, wide: bool = False) -> _BaseCard:
+    if getattr(item, "friend_id", None) is not None:
+        # A friend's film or episode in one of this library's rows (Home's
+        # Continue Watching): a card whose menu never reaches this library.
+        from ..friend_library_view import friend_card
+
+        return friend_card(item, wide)
     if wide:
         return WideCard(item)
     if isinstance(item, ShowItem):

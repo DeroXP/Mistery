@@ -1,4 +1,5 @@
 """The landing page: one HTML document, built here, with no JavaScript at all.
+(And the two link pages at the end of this file, which carry one small script.)
 
 Every number on this page comes from somewhere real. The version, the file name,
 the size and the SHA-256 come out of the signed manifest, so the page cannot
@@ -9,17 +10,20 @@ screensaver's 24 px of drift over six minutes - because a page full of adjective
 tells a stranger nothing about whether the thing is any good.
 
 No JavaScript is not a pose, it is what makes the Content-Security-Policy in
-service.py honest: `script-src 'none'` and `default-src 'none'` are easy to mean
-when the page has nothing to run. It also means the page works before the first
+service.py honest: `default-src 'none'`, with no script-src to loosen it, is easy
+to mean when the page has nothing to run. (The /add and /join pages have to read
+a code out of the address, so they are allowed one script, by its hash: see
+LINK_SCRIPT. This page is not.) It also means the page works before the first
 frame, on a phone on a train, and that there is nothing here that could watch
 anybody. Everything dynamic is rendered server-side, once per request, from a
 manifest that is already in memory.
 
 The one thing this page must never do is claim something Mistery does not do. It
 plays files you already have. It does not find, buy or download media, and
-nothing on this page may imply that it does. The one thing it streams is a movie
-night: a file the host already has, from their PC straight to the friends they
-invited, while they watch it together.
+nothing on this page may imply that it does. What it streams is always a file a
+friend already has, from their PC straight to the friends they chose: a movie
+night, watched together, or a friend's library, which friends play from each
+other's PCs as they watch, keeping nothing but the list of titles and the art.
 """
 
 from __future__ import annotations
@@ -250,8 +254,9 @@ def _hero(config: Config, current: Current | None) -> str:
     Point it at your folders and it works out what everything is, finds the artwork, and then
     plays it properly — mpv underneath, so 4K HEVC in an MKV with 5.1 audio and HDR just plays.</p>
     {button}{signing_note}
-    <p class="honest">It plays files you already have. Mistery does not find, stream, buy or
-    download anything, and there is no account to make.</p>
+    <p class="honest">It plays files you already have, and your friends' straight from their
+    PCs. Mistery does not find, buy or download films or music, and there is no account to
+    make.</p>
     {note}
   </div>
   <div class="hero-mark" aria-hidden="true">
@@ -380,6 +385,124 @@ def _footer(config: Config, current: Current | None) -> str:
   <p class="quiet">No cookies, no analytics, no accounts. This page sets nothing, stores
   nothing and loads nothing from anywhere else.</p>
 </footer>
+"""
+
+
+# --- the link pages: /add (a friend's code) and /join (a movie night's invite) ---
+#
+# What Mistery's "Copy link" hands out, for a chat that only makes web addresses
+# clickable: https://<this site>/add#<code>. The code is after the #, which a
+# browser never sends to a server, so this service never sees it — a friend
+# code is a one-time secret, and "stores nothing" should not need a promise
+# about logs to stay true. Reading it from there takes a script, the only one
+# on this site: LINK_SCRIPT, allowed on these two pages alone, by its SHA-256
+# (link_csp), so nothing else can run on them either. Without scripts the page
+# still says what to do: paste the code from the link into Mistery.
+#
+# The button is a mistery:// link, which an installed Mistery answers (main.py
+# _register_links). It only fills the code in; adding the friend or joining the
+# movie night is still a button the person presses in Mistery.
+#
+# The script is forgiving about what arrives: a code retyped in lower case or
+# with spaces is still 65 letters and digits once the rest is dropped, and a
+# code's first character says what it is (app/party/invite.py: 1 a movie night,
+# 2 a friend, 3 a movie night on a friend's PC), so a friend's code on /join is
+# sent to /add rather than refused.
+# Whether the code is real (its checksum) is for Mistery to say, not this page.
+
+LINK_SCRIPT = (
+    '(function(){function show(){'
+    'var kind=document.body.getAttribute("data-kind"),hash=(location.hash||"").slice(1),raw;'
+    'try{raw=decodeURIComponent(hash)}catch(e){raw=hash}'
+    'raw=raw.toUpperCase().replace(/[^0-9A-Z]/g,"");'
+    'var found=document.getElementById("found"),nocode=document.getElementById("nocode");'
+    'document.getElementById("noscript").hidden=true;found.hidden=true;nocode.hidden=true;'
+    'if(!/^[123][0-9A-Z]{64}$/.test(raw)){nocode.hidden=false;return}'
+    'var its=raw.charAt(0)==="2"?"add":"join",groups=raw.match(/.{5}/g),code=groups.join("-");'
+    'if(its!==kind){location.replace("/"+its+"#"+code);return}'
+    'var box=document.getElementById("code");box.textContent="";'
+    'groups.forEach(function(g,i){if(i){box.appendChild(document.createTextNode("-"));'
+    'box.appendChild(document.createElement("wbr"))}box.appendChild(document.createTextNode(g))});'
+    'document.getElementById("open").setAttribute("href","mistery://"+kind+"/"+code);'
+    'found.hidden=false}'
+    'show();window.addEventListener("hashchange",show)})();'
+)
+
+
+def link_csp(base: str) -> str:
+    """The site's Content-Security-Policy, with LINK_SCRIPT and only it allowed."""
+    import base64
+    import hashlib
+
+    digest = base64.b64encode(hashlib.sha256(LINK_SCRIPT.encode("utf-8")).digest()).decode()
+    return f"{base}; script-src 'sha256-{digest}'"
+
+
+_LINK_WORDS = {
+    "add": {
+        "title": "Add a friend in Mistery",
+        "heading": "A friend wants to share their library with you.",
+        "lede": ("Mistery plays the films, shows and music on your PC. Friends in Mistery play "
+                 "from each other's too, streamed straight from one PC to the other, with no "
+                 "account and no server in between. Open this in Mistery to add them: their "
+                 "library appears under Friends, and adding them shares yours with them."),
+        "where": "In Mistery, open <b>Friends</b> and paste it under <b>Add theirs</b>",
+    },
+    "join": {
+        "title": "Join a movie night in Mistery",
+        "heading": "You're invited to a movie night.",
+        "lede": ("Open it in Mistery to join. The film plays from your friend's PC, in step with "
+                 "everyone watching, each on their own screen."),
+        "where": "In Mistery, press <b>Movie night</b> at the top of the window and paste it",
+    },
+}
+
+
+def render_link(kind: str, config: Config) -> str:
+    """The /add or /join page."""
+    words = _LINK_WORDS[kind]
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_esc(words['title'])}</title>
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#141414">
+<meta name="robots" content="noindex">
+<link rel="icon" href="/static/icon.png" type="image/png">
+<link rel="stylesheet" href="/static/site.css">
+</head>
+<body data-kind="{kind}">
+<header class="top">
+  <a class="brand" href="/"><img src="/static/icon.png" alt="" width="32" height="32"><span>Mistery</span></a>
+</header>
+<main>
+  <section class="hero link-page">
+    <div class="hero-text">
+      <h1>{_esc(words['heading'])}</h1>
+      <p class="lede">{_esc(words['lede'])}</p>
+      <div id="found" hidden>
+        <a id="open" class="download" href="/">
+          <span class="download-main">Open in Mistery</span>
+          <span class="download-sub">It fills the code in; you press the button there</span>
+        </a>
+        <p class="link-fallback">Nothing happened? {words['where']}:</p>
+        <p class="link-code"><code id="code"></code></p>
+      </div>
+      <p id="noscript" class="link-fallback">{words['where']}: the code is the part of this
+      page's address after the <b>#</b>.</p>
+      <p id="nocode" class="link-fallback" hidden>This link has no code in it, or only part of
+      one. Ask your friend to send it again.</p>
+      <p class="honest">No Mistery yet? <a href="/">Get it here</a> (Windows 11), install it,
+      then open this link again. The code never reaches this site: it stays in your browser,
+      after the # in the address.</p>
+    </div>
+  </section>
+</main>
+<script>{LINK_SCRIPT}</script>
+</body>
+</html>
 """
 
 

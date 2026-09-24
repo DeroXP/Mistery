@@ -7,8 +7,12 @@ A code is 13 groups of 5, made to be pasted into Discord or a text:
 What it carries, in 65 characters of 5 bits (325 bits: 288 of them the
 addresses, port, token and pin, 2 spare, and the version and checksum):
 
-    version      which layout this is (1), so an older Mistery can say "update
-                 Mistery" instead of "that code is wrong"
+    kind         what the code is: 1 a movie night invite, 2 a friend request
+                 (app/share/pairing.py). One layout for both, so a code pasted
+                 into the wrong box is recognised and named rather than
+                 refused as a typo. A higher number is a layout this Mistery
+                 does not know, and the person is told to update Mistery
+                 instead of that their code is wrong.
     internet IP  the home's public IPv4: the router's, from UPnP, or a public
                  STUN server's answer when the router won't say (stun);
                  0.0.0.0 when there is none
@@ -36,13 +40,14 @@ Why it is shaped like that:
   missing or extra character is caught by the shape alone.
 - 104 bits for the token and the pin rather than the 96 that would do, because
   the layout then comes out at exactly 13 groups of 5.
-- A later layout may be longer, but must keep two things: the version as the
+- A later layout may be longer, but must keep two things: the kind as the
   first character, and this checksum over the whole code. Then this version
   recognises it as newer at any length, and says "update Mistery".
 
 decode() is for whatever a person pastes: the code alone, a whole Discord
-message with the code somewhere in it, a mistery://join/ link, in any case, with
-the dashes turned into spaces or en dashes by some chat app on the way.
+message with the code somewhere in it, a link to the website's /join page or a
+mistery://join/ link, in any case, with the dashes turned into spaces or en
+dashes by some chat app on the way.
 """
 
 from __future__ import annotations
@@ -54,9 +59,25 @@ import unicodedata
 from dataclasses import dataclass
 
 VERSION = 1
+KIND_JOIN = 1               # join a movie night: the token is that night's password
+KIND_PAIR = 2               # add a friend: the token is the one-time pairing secret
+# Join a movie night held on a friend's PC, on its film (app/share/nights.py):
+# the token is that night's password, and the PC lets in only its own friends,
+# so a guest shows this install's certificate when joining. A Mistery from
+# before 1.3 reads it as a newer code and says to update, which it must.
+KIND_FRIENDS = 3
+KINDS = (KIND_JOIN, KIND_PAIR, KIND_FRIENDS)
+NIGHTS = (KIND_JOIN, KIND_FRIENDS)          # the kinds a movie night is joined with
 TOKEN_BYTES = 13            # 104 bits
 PIN_BYTES = 13              # 104 of the certificate SHA-256's 256 bits
 LINK_PREFIX = "mistery://join/"
+LINK_PREFIXES = {KIND_JOIN: LINK_PREFIX, KIND_PAIR: "mistery://add/", KIND_FRIENDS: LINK_PREFIX}
+# Mistery's website. "Copy link" hands out a link to a page there, because a
+# chat makes an https:// link clickable and a mistery:// one not. The page reads
+# the code from after the #, which a browser never sends, so the site never sees
+# it, and offers to open the mistery:// link.
+SITE = "https://mistery.up.railway.app"
+WEB_PAGES = {KIND_JOIN: SITE + "/join#", KIND_PAIR: SITE + "/add#", KIND_FRIENDS: SITE + "/join#"}
 
 ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _VALUE = {c: i for i, c in enumerate(ALPHABET)}
@@ -123,9 +144,10 @@ class Invite:
     wan_ip: str | None      # the host's internet address, None when unknown
     lan_ip: str | None      # the host's address on its own network, None when unknown
     port: int
-    token: bytes            # TOKEN_BYTES of randomness, the movie night's password
+    token: bytes            # TOKEN_BYTES of randomness: the movie night's password, or the pairing secret
     pin: bytes              # the leading PIN_BYTES of the certificate's SHA-256
     version: int = VERSION
+    kind: int = KIND_JOIN   # KIND_JOIN a movie night, KIND_PAIR a friend request, KIND_FRIENDS a friend's PC's night
 
 
 def new_token() -> bytes:
@@ -143,6 +165,8 @@ def encode(invite: Invite) -> str:
     """
     if invite.version != VERSION:
         raise ValueError(f"this Mistery writes invite version {VERSION}, not {invite.version}")
+    if invite.kind not in KINDS:
+        raise ValueError(f"an invite is kind {', '.join(map(str, KINDS))}, not {invite.kind!r}")
     token = bytes(invite.token)
     if len(token) != TOKEN_BYTES:
         raise ValueError(f"the token must be {TOKEN_BYTES} bytes, not {len(token)}")
@@ -164,16 +188,32 @@ def encode(invite: Invite) -> str:
     number = number << (8 * PIN_BYTES) | int.from_bytes(pin[:PIN_BYTES], "big")
     number <<= _DATA_SYMBOLS * 5 - _PAYLOAD_BITS
     data = [(number >> (5 * i)) & 31 for i in reversed(range(_DATA_SYMBOLS))]
-    symbols = [VERSION] + data
+    symbols = [invite.kind] + data
     symbols += _checksum(symbols)
     text = "".join(ALPHABET[s] for s in symbols)
     return "-".join(text[i:i + _GROUP] for i in range(0, len(text), _GROUP))
 
 
-def link(invite: Invite | str) -> str:
-    """mistery://join/<code>, for friends who have the link handler installed."""
-    code = invite if isinstance(invite, str) else encode(invite)
-    return LINK_PREFIX + code
+def link(invite: Invite | str, kind: int = KIND_JOIN) -> str:
+    """mistery://join/<code> or mistery://add/<code>, for the link handler.
+
+    A code on its own says which it is in its first character, so `kind` only
+    has to be given when the code is passed as text rather than as an Invite.
+    """
+    if isinstance(invite, Invite):
+        kind, invite = invite.kind, encode(invite)
+    return LINK_PREFIXES[kind] + invite
+
+
+def web_link(invite: Invite | str, kind: int = KIND_JOIN) -> str:
+    """https://<the site>/join#<code> or /add#<code>: the link to send.
+
+    Clicked, the page there opens link()'s mistery:// link; pasted into Mistery
+    instead, it decodes like any other text with the code in it.
+    """
+    if isinstance(invite, Invite):
+        kind, invite = invite.kind, encode(invite)
+    return WEB_PAGES[kind] + invite
 
 
 def decode(text: str) -> Invite:
@@ -260,7 +300,7 @@ def _newer(cleaned: str) -> bool:
                 break                   # too few symbols from here on to be any code
             left -= len(words[start])
             first = _VALUE.get(words[start][0].upper())
-            if first is None or first <= VERSION:
+            if first is None or first <= max(KINDS):
                 continue
             check, count = _DOMAIN_CHECK, 0
             for word in words[start:]:
@@ -305,10 +345,11 @@ def _unpack(code: str) -> Invite:
         raise InviteError(PARTIAL)
     if _polymod(_DOMAIN + symbols) != _CONSTANT:
         raise InviteError(MISTYPED)
-    if symbols[0] > VERSION:
+    if symbols[0] > max(KINDS):
         raise InviteError(NEWER)
-    if symbols[0] != VERSION:
+    if symbols[0] not in KINDS:
         raise InviteError(DAMAGED)
+    kind = symbols[0]
 
     number = 0
     for value in symbols[1:1 + _DATA_SYMBOLS]:
@@ -339,4 +380,5 @@ def _unpack(code: str) -> Invite:
         addresses.append(str(address))
     if not port:
         raise InviteError(DAMAGED)
-    return Invite(wan_ip=addresses[0], lan_ip=addresses[1], port=port, token=token, pin=pin)
+    return Invite(wan_ip=addresses[0], lan_ip=addresses[1], port=port, token=token, pin=pin,
+                  kind=kind)

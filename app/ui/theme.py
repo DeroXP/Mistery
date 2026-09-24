@@ -109,6 +109,9 @@ QPushButton#NavItem {{
 }}
 QPushButton#NavItem:hover {{ color: {C.TEXT}; }}
 QPushButton#NavItem:checked {{ color: {C.TEXT}; font-weight: 700; }}
+/* A narrow window (MainWindow._fit_topbar): the page names close up rather
+   than squeeze the wordmark. */
+#TopBar[compact="true"] QPushButton#NavItem {{ padding: 8px 9px; }}
 #NavStats {{ color: {C.TEXT_FAINT}; font-size: 8.5pt; }}
 
 /* ---------- headings ---------- */

@@ -699,10 +699,13 @@ class SettingsView(QWidget):
         card, layout = _section(
             "Discord Rich Presence",
             "Shows what you're watching on your Discord profile. Discord needs "
-            "an application of its own to attribute this to, which takes about "
-            "a minute to make: discord.com/developers/applications → New "
-            "Application → copy the Application ID. Optionally upload an image "
-            "named 'mistery' under Rich Presence → Art Assets for the icon.",
+            "an application of its own to put this under, which takes about a "
+            "minute to make: discord.com/developers/applications → New "
+            "Application → copy the Application ID into the box below. The "
+            "application's name is what friends see above the title, so name "
+            "it whatever you want that line to say. Nothing else about it "
+            "matters, and Mistery never signs in to it — it only tells the "
+            "Discord app already running on this PC what to show.",
         )
 
         self._discord_on = QCheckBox("Show what I'm watching on Discord")
@@ -740,12 +743,19 @@ class SettingsView(QWidget):
         layout.addLayout(art_row)
 
         self._discord_art_note = QLabel(
-            "Discord shows art you have uploaded to your own application, so it "
-            "can only use a picture you have given it. This builds one 1024x576 "
-            "image per show and film — the 16:9 shape Discord requires — already "
-            "named the way Mistery will ask for it. Drop the whole folder into "
-            "Rich Presence → Art Assets and each title gets its own image. "
-            "Anything you skip falls back to the Mistery icon."
+            "Most titles need nothing here. Where a film or show was matched "
+            "online, its poster already has a public web address and Discord "
+            "fetches the picture itself, so it shows up with no upload at all.\n"
+            "\n"
+            "Two kinds of title still need one: anything Mistery could not "
+            "match online, and anything whose artwork it made from the film's "
+            "own frames — that picture exists only on this PC, so Discord has "
+            "no way to see it. This button builds one 1024x576 image per show "
+            "and film, the 16:9 shape Discord wants, each already named the "
+            "way Mistery will ask for it. Drop the ones you want into Rich "
+            "Presence → Art Assets on your application. Anything you skip "
+            "falls back to the Mistery icon, which is itself an image named "
+            "'mistery' you can upload there."
         )
         self._discord_art_note.setObjectName("Faint")
         self._discord_art_note.setWordWrap(True)
@@ -765,25 +775,28 @@ class SettingsView(QWidget):
         froze the window for over half a minute on a 500-title library.
         """
         from ..config import data_dir
-        from ..discord_presence import asset_key
-
-        # One image per show and per film — an episode uses its show's art.
-        wanted: dict[str, tuple[str, str]] = {}
-        for row in list(db.all_shows()) + list(db.movies()):
-            columns = row.keys()
-            backdrop = (row["backdrop"] if "backdrop" in columns else "") or ""
-            poster = row["poster"] or backdrop
-            if poster:
-                wanted.setdefault(asset_key(row["title"]), (poster, backdrop))
-        wanted.pop("", None)
 
         target = data_dir() / "discord-art"
         self._discord_export.setEnabled(False)
-        self._discord_status.setText(f"Building {len(wanted)} image(s)…")
+        self._discord_status.setText("Asking Discord what is already uploaded…")
         threading.Thread(
-            target=self._write_discord_art, args=(target, wanted),
+            target=self._plan_and_write_discord_art, args=(target,),
             name="discord-art", daemon=True,
         ).start()
+
+    def _plan_and_write_discord_art(self, target: Path) -> None:
+        """Ask Discord what it has, decide what it still needs, then write it.
+
+        Both halves off the UI thread: the list is a request to discord.com (up
+        to 6 s when the network is slow), and the plan reads every film, show
+        and album. See app/discord_art.py for what is chosen and why.
+        """
+        from .. import discord_art
+        from ..discord_presence import list_assets
+
+        known = list_assets(str(settings.get("discord_client_id", "") or "").strip())
+        self._art_plan = discord_art.plan(known)
+        self._write_discord_art(target, self._art_plan.wanted)
 
     def _write_discord_art(self, target: Path, wanted: dict[str, tuple[str, str]]) -> None:
         """The export's file work, off the UI thread. Reports through _art_exported."""
@@ -824,15 +837,28 @@ class SettingsView(QWidget):
         if error:
             self._discord_status.setText(error)
             return
+        from .. import discord_art
+
+        plan = getattr(self, "_art_plan", None)
+        why = discord_art.describe(plan) if plan is not None else ""
+        if written == 0 and not skipped:
+            # Nothing to upload is the good outcome now, not a failure: say so
+            # plainly, and don't open an empty folder at the owner.
+            self._discord_status.setText(
+                "Nothing needs uploading — Discord already has everything, or fetches it "
+                "from the web." + (f" {why}" if why else ""))
+            return
         reveal_in_explorer(target)
-        note = (f"Wrote {written} image(s) at {ART_SIZE[0]}x{ART_SIZE[1]} "
+        what = ""
+        if plan is not None:
+            what = f" ({plan.films} film or show poster(s), {plan.albums} album cover(s))"
+        note = (f"Wrote {written} image(s){what} at {ART_SIZE[0]}x{ART_SIZE[1]} "
                 f"to {target}.")
         if skipped:
             note += f" {skipped} could not be read."
         self._discord_status.setText(
-            note + "  Upload them under Rich Presence → Art Assets, keeping the "
-            "file names exactly as they are."
-        )
+            note + "  Upload them under Rich Presence → Art Assets, keeping the file "
+            "names exactly as they are." + (f" {why}" if why else ""))
 
     def _on_discord_toggled(self, value: bool) -> None:
         settings.set("discord_presence", value)
@@ -935,7 +961,7 @@ class SettingsView(QWidget):
         port_row.addStretch(1)
         layout.addLayout(port_row)
 
-        self._party_upnp = QCheckBox(f"{_UPNP_BOX} while a movie night runs (UPnP)")
+        self._party_upnp = QCheckBox(f"{_UPNP_BOX} while a movie night or sharing is on (UPnP)")
         self._party_upnp.toggled.connect(self._on_party_upnp)
         layout.addWidget(self._party_upnp)
 
@@ -981,10 +1007,14 @@ class SettingsView(QWidget):
             f"port, and with “{_UPNP_BOX}” ticked asks your router to forward it to this PC, "
             "so friends outside your home can reach it. For that evening anyone on the internet "
             "could knock on it, so Mistery answers only someone with that movie night's code. "
-            "Everything goes over an encrypted connection with a certificate made for that night "
-            "alone, and the film being watched is the only thing it serves: never your library, "
-            "never any other file. The port closes when the movie night ends, and if Mistery "
-            "crashes mid-film it gives the router the port back the next time it starts.\n\n"
+            "Everything goes over an encrypted connection, and the film being watched is the only "
+            "thing a movie night serves: never your library, never any other file. The port "
+            "closes when the movie night ends, and if Mistery crashes mid-film it gives the router "
+            "the port back the next time it starts.\n\n"
+            "With library sharing on (the Friends page), the port stays open between movie nights "
+            "too, for the friends you've added and nobody else: their Mistery has to show the "
+            "certificate written down when you added each other. A movie night then uses this PC's "
+            "lasting certificate rather than one made for the night.\n\n"
             "Mistery asks a public STUN server — Cloudflare's, then Google's — for your internet "
             "address when your router won't say; that is all it sends."
         )

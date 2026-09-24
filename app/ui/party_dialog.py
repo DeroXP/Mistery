@@ -862,6 +862,35 @@ def ask_to_end(parent, session, quitting: bool = False) -> bool:
     return box.clickedButton() is end
 
 
+def ask_to_end_friends_night(parent) -> bool:
+    """Whether quitting may end a friend's movie night on this PC's film
+    (app/share/nights.py): at once with nobody in it (or none on), and only on
+    a yes while friends are watching, because it ends for them. Keep Mistery
+    open is the default, and what Esc answers, as in ask_to_end."""
+    from .. import share
+
+    nights = getattr(share, "nights", None)         # never imported: never held one
+    night = nights.current() if nights is not None else None
+    if night is None:
+        return True
+    names = [str(p.get("name") or "A friend") for p in list(night.hub.people)]
+    if not names:
+        return True
+    box = QMessageBox(parent)
+    box.setWindowTitle("Friends are watching")
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setText(f"{and_list(names)} {'is' if len(names) == 1 else 'are'} watching {night.title} "
+                "from your library, in a movie night on this PC. Quit Mistery anyway?")
+    box.setInformativeText("It ends for them. Closing the window with music playing keeps "
+                           "Mistery running in the tray, and the movie night with it.")
+    end = box.addButton("End it and quit", QMessageBox.ButtonRole.DestructiveRole)
+    keep = box.addButton("Keep Mistery open", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(keep)
+    box.setEscapeButton(keep)
+    box.exec()
+    return box.clickedButton() is end
+
+
 # --- the host -------------------------------------------------------------------
 
 class HostDialog(_MovieNightDialog):
@@ -983,11 +1012,9 @@ class HostDialog(_MovieNightDialog):
         self.copy_code.clicked.connect(self._copy_code)
         copy_row.addWidget(self.copy_code)
         self.copy_link = _button("Copy link", "Ghost")
-        # Nothing registers mistery:// with Windows yet, so the link is not
-        # something to click: it is the code saying what it is for, and Join
-        # takes it pasted just the same.
-        self.copy_link.setToolTip("The same code as a mistery://join/ link, which says what it is "
-                                  "for. Friends paste it into Join movie night just the same.")
+        self.copy_link.setToolTip("The same code as a link friends can click: it opens Mistery's "
+                                  "Join panel with the code filled in. The code stays after the #, "
+                                  "so the website never sees it.")
         self.copy_link.clicked.connect(self._copy_link)
         copy_row.addWidget(self.copy_link)
         self.copied = QLabel()
@@ -1566,8 +1593,8 @@ class JoinDialog(_MovieNightDialog):
         self._last_length = 0
         self._needs_fresh_code = False
         self.headline.setText("Join a friend's movie night")
-        self.subline.setText("Paste the invite code they sent you. The whole message it came in "
-                             "works too, or a mistery://join/ link.")
+        self.subline.setText("Paste the invite code they sent you. The link works too, or the "
+                             "whole message it came in.")
 
         self.code_row = QWidget()
         row = QHBoxLayout(self.code_row)
@@ -1620,6 +1647,35 @@ class JoinDialog(_MovieNightDialog):
         self.failure_text = _text("", 9.8, C.TEXT_DIM)
         failure.addWidget(self.failure_text)
         self.body.addWidget(self.failure_box)
+
+        # In a movie night on a friend's PC (Watch together), its code is this
+        # guest's to pass on to that friend's other friends: nobody hosts it on
+        # this side to show one, so it is shown here, with the host's buttons.
+        self.pass_on, pass_on = _box("NoteBox", spacing=8)
+        self.pass_on_text = _text("", 9.8, C.TEXT_DIM, rich=False)
+        pass_on.addWidget(self.pass_on_text)
+        self.pass_on_code = QLabel()
+        self.pass_on_code.setStyleSheet(f"color: {C.TEXT}; {_MONO} font-size: 12pt; font-weight: 600;")
+        self.pass_on_code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.pass_on_code.setWordWrap(True)
+        pass_on.addWidget(self.pass_on_code)
+        pass_on_row = QHBoxLayout()
+        pass_on_row.setSpacing(10)
+        self.pass_on_copy = _button("Copy code", "Primary")
+        self.pass_on_copy.setAutoDefault(False)
+        self.pass_on_copy.clicked.connect(lambda: self._pass_on(self.session.invite_code, "Copied."))
+        pass_on_row.addWidget(self.pass_on_copy)
+        self.pass_on_link = _button("Copy link", "Ghost")
+        self.pass_on_link.setAutoDefault(False)
+        self.pass_on_link.clicked.connect(lambda: self._pass_on(self.session.invite_link, "Link copied."))
+        pass_on_row.addWidget(self.pass_on_link)
+        self.pass_on_copied = QLabel()
+        self.pass_on_copied.setStyleSheet(f"color: {C.SUCCESS}; font-weight: 600;")
+        self.pass_on_copied.setVisible(False)
+        pass_on_row.addWidget(self.pass_on_copied)
+        pass_on_row.addStretch(1)
+        pass_on.addLayout(pass_on_row)
+        self.body.addWidget(self.pass_on)
 
         self.body.addSpacing(16)
         self.name_note = _text("", 9.0, C.TEXT_FAINT)
@@ -1707,6 +1763,26 @@ class JoinDialog(_MovieNightDialog):
             if show:
                 self._say(f"<span style='color:{C.DANGER}'>{html.escape(str(problem))}</span>")
             return None
+        if found.kind not in invite.NIGHTS:
+            # A friend code (the Friends page), which is the same 13 groups to
+            # look at. Say which one it is rather than that it is wrong.
+            from ..share.pairing import NOT_AN_INVITE
+
+            if show:
+                self._say(f"<span style='color:{C.DANGER}'>{html.escape(NOT_AN_INVITE)}</span>")
+            return None
+        friend = None
+        if found.kind == invite.KIND_FRIENDS:
+            # A movie night on a friend's PC, for its friends only: whose PC,
+            # or that it is nobody's here, before Join is pressed.
+            from ..share import nights
+
+            friend = nights.host_friend(found.pin)
+            if friend is None:
+                if show:
+                    self._say(f"<span style='color:{C.DANGER}'>"
+                              f"{html.escape(nights.NOT_THEIR_FRIEND)}</span>")
+                return None
         canonical = invite.encode(found)
         if text.strip() != canonical:
             # The code alone, as the host's panel shows it, rather than the
@@ -1722,6 +1798,13 @@ class JoinDialog(_MovieNightDialog):
             # host's word (party_forwarded), so a friend told "it works from
             # anywhere" could read that and then "Couldn't reach the host's PC".
             # Only on their home network is exact, and says so.
+            if friend is not None:
+                # Where it is reached is where this PC last reached that friend,
+                # which the Friends page already speaks for.
+                self._say(f"<span style='color:{C.SUCCESS}'>That's an invite code.</span> "
+                          f"The movie night is on {html.escape(friend['name'])}'s PC, for "
+                          "their friends.")
+                return canonical
             if found.wan_ip and found.lan_ip:
                 has = "It has their home network's address and their internet address."
             elif found.lan_ip:
@@ -1842,6 +1925,12 @@ class JoinDialog(_MovieNightDialog):
         self.session.leave()
         self.reject()
 
+    def _pass_on(self, text: str, said: str) -> None:
+        if text:
+            QGuiApplication.clipboard().setText(text)
+            self.pass_on_copied.setText(said)
+            self.pass_on_copied.setVisible(True)
+
     def _show_state(self, state: str) -> None:
         self.state = state
         connecting = state == self.CONNECTING
@@ -1863,6 +1952,15 @@ class JoinDialog(_MovieNightDialog):
                                  else "Join")
         self.leave_button.setVisible(joined)
         self.cancel_button.setText("Close" if joined else "Cancel")
+        passing = joined and bool(self.session.invite_code)
+        self.pass_on.setVisible(passing)
+        if passing:
+            host = self.session.host_name
+            self.pass_on_text.setText(
+                f"It's on {host}'s PC, so only {host}'s friends can join. Send them the code:"
+                if host else "Only friends of the PC it's on can join. Send them the code:")
+            self.pass_on_code.setText(split_code(self.session.invite_code))
+            self.pass_on_copied.setVisible(False)
         if joined:
             host = self.session.host_name
             title = self.session.media_title
@@ -1871,8 +1969,8 @@ class JoinDialog(_MovieNightDialog):
             self.subline.setText(f"Watching {title}." if title else "")
         else:
             self.headline.setText("Join a friend's movie night")
-            self.subline.setText("Paste the invite code they sent you. The whole message it came "
-                                 "in works too, or a mistery://join/ link.")
+            self.subline.setText("Paste the invite code they sent you. The link works too, or "
+                                 "the whole message it came in.")
         self.fit()
 
 

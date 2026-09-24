@@ -215,7 +215,11 @@ def generate(
 ) -> dict:
     """Produce poster + backdrop from the video itself.
 
-    Returns the columns to write back onto the media row.
+    Returns the columns to write back onto the media row. The `_url` columns
+    are always empty here and say so out loud: this picture exists only on this
+    PC, so there is nothing Discord could fetch. db.update_media would clear
+    them anyway — writing a picture without its address means the old address
+    no longer describes it — but a reader should not have to know that.
     """
     poster_path = _art_path(video_path, "poster")
     backdrop_path = _art_path(video_path, "backdrop")
@@ -225,7 +229,9 @@ def generate(
     if poster_path.is_file() and backdrop_path.is_file():
         return {
             "poster": str(poster_path),
+            "poster_url": None,
             "backdrop": str(backdrop_path),
+            "backdrop_url": None,
             "meta_state": "fallback",
             "meta_source": "ffmpeg",
         }
@@ -243,9 +249,11 @@ def generate(
 
     result = {
         "backdrop": str(backdrop_path),
+        "backdrop_url": None,
         "meta_state": "fallback",
         "meta_source": "ffmpeg",
     }
     if compose_poster(frame, poster_path):
         result["poster"] = str(poster_path)
+        result["poster_url"] = None
     return result

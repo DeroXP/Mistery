@@ -379,8 +379,10 @@ class LikeButton(IconButton):
         self.setChecked(liked)
         self.blockSignals(False)
         self.set_icon_name("heart_filled" if liked else "heart")
-        self.setToolTip("Remove from Liked Songs" if liked else "Save to Liked Songs")
-        self.setEnabled(current is not None)
+        friends = bool(current and current.get("friend"))
+        self.setToolTip("A friend's song: Liked Songs is for your own" if friends else
+                        "Remove from Liked Songs" if liked else "Save to Liked Songs")
+        self.setEnabled(current is not None and not friends)
         self.update()
 
 
@@ -517,6 +519,7 @@ _CONTEXT_CAPTIONS = {
     "search": "PLAYING FROM SEARCH",
     "playlist": "PLAYING FROM PLAYLIST",
     "queue": "PLAYING FROM",
+    "friend": "PLAYING FROM A FRIEND'S LIBRARY",
 }
 
 
@@ -1837,7 +1840,9 @@ class NowPlayingBar(QWidget):
 
     def _open_artist(self) -> None:
         current = self._player.current
-        if current:
+        # A friend's artist has no page in this library: their album is where
+        # "Playing from" goes.
+        if current and not current.get("friend"):
             self.artist_requested.emit(current.get("album_artist_name") or current.get("album_artist")
                                        or current.get("artist") or "")
 

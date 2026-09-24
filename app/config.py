@@ -376,6 +376,14 @@ DEFAULTS: dict = {
     "party_port": 42170,            # the one port a movie night listens on
     "party_upnp": True,             # ask the router to open that port while it runs
     "party_forwarded": False,       # the owner says they forwarded the port by hand
+
+    # Library sharing: friends' films, shows and music, played from their PC.
+    # Sharing rides on the movie night port, so there is nothing else to forward.
+    "sharing_enabled": False,       # switched on by itself when the first friend is added
+    "sharing_music": True,          # albums and songs go too, not only films and shows
+    "sharing_background": True,     # keep serving friends while Mistery itself is closed
+    "sharing_keep_awake": True,     # don't let the PC sleep while a friend is watching
+    "sharing_max_streams": 3,       # how many friends can be watching this PC at once
     "party_quality": "auto",        # auto | original | 1080p | 720p
     # No auto_update key here on purpose. Updates are MisteryUpdate.exe's job
     # and the switch lives in updater.json in the install folder, because the

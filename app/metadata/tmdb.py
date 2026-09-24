@@ -184,21 +184,30 @@ class TmdbClient:
 
     # --- images -------------------------------------------------------------
 
-    def download_image(self, remote_path: str | None, size: str, name: str) -> str | None:
+    def download_image(
+        self, remote_path: str | None, size: str, name: str
+    ) -> tuple[str | None, str | None]:
+        """(the file saved in the art folder, the address it was fetched from).
+
+        image.tmdb.org is public and needs no key, and Discord's rich presence
+        will fetch a picture from a public address itself — so the address is
+        worth as much as the file now. It is only ever returned beside the file
+        it fetched, so the two cannot drift apart later.
+        """
         if not remote_path:
-            return None
+            return None, None
         destination = art_dir() / f"{name}{Path(remote_path).suffix or '.jpg'}"
-        if destination.is_file() and destination.stat().st_size > 0:
-            return str(destination)
         url = f"{IMAGE_BASE}/{size}{remote_path}"
+        if destination.is_file() and destination.stat().st_size > 0:
+            return str(destination), url
         try:
             response = self._session.get(url, timeout=_TIMEOUT * 2)
             if response.status_code != 200 or not response.content:
-                return None
+                return None, None
             destination.write_bytes(response.content)
         except (requests.RequestException, OSError):
-            return None
-        return str(destination)
+            return None, None
+        return str(destination), url
 
     # --- high level ---------------------------------------------------------
 
@@ -210,18 +219,22 @@ class TmdbClient:
         movie_id = int(match["id"])
         details = self.movie_details(movie_id) or match
 
+        poster, poster_url = self.download_image(
+            details.get("poster_path"), POSTER_SIZE, f"tmdb-movie-{movie_id}-p"
+        )
+        backdrop, backdrop_url = self.download_image(
+            details.get("backdrop_path"), BACKDROP_SIZE, f"tmdb-movie-{movie_id}-b"
+        )
         fields: dict = {
             "tmdb_id": movie_id,
             "overview": details.get("overview") or None,
             "tagline": details.get("tagline") or None,
             "rating": details.get("vote_average") or None,
             "genres": ", ".join(g["name"] for g in details.get("genres") or []) or None,
-            "poster": self.download_image(
-                details.get("poster_path"), POSTER_SIZE, f"tmdb-movie-{movie_id}-p"
-            ),
-            "backdrop": self.download_image(
-                details.get("backdrop_path"), BACKDROP_SIZE, f"tmdb-movie-{movie_id}-b"
-            ),
+            "poster": poster,
+            "poster_url": poster_url,
+            "backdrop": backdrop,
+            "backdrop_url": backdrop_url,
             "meta_state": "done",
             "meta_source": "tmdb",
         }
@@ -244,17 +257,21 @@ class TmdbClient:
         show_id = int(match["id"])
         details = self.show_details(show_id) or match
 
+        poster, poster_url = self.download_image(
+            details.get("poster_path"), POSTER_SIZE, f"tmdb-tv-{show_id}-p"
+        )
+        backdrop, backdrop_url = self.download_image(
+            details.get("backdrop_path"), BACKDROP_SIZE, f"tmdb-tv-{show_id}-b"
+        )
         fields: dict = {
             "tmdb_id": show_id,
             "overview": details.get("overview") or None,
             "rating": details.get("vote_average") or None,
             "genres": ", ".join(g["name"] for g in details.get("genres") or []) or None,
-            "poster": self.download_image(
-                details.get("poster_path"), POSTER_SIZE, f"tmdb-tv-{show_id}-p"
-            ),
-            "backdrop": self.download_image(
-                details.get("backdrop_path"), BACKDROP_SIZE, f"tmdb-tv-{show_id}-b"
-            ),
+            "poster": poster,
+            "poster_url": poster_url,
+            "backdrop": backdrop,
+            "backdrop_url": backdrop_url,
             "meta_state": "done",
         }
         if confident and details.get("name"):
@@ -268,7 +285,7 @@ class TmdbClient:
         details = self.episode_details(show_tmdb_id, season, episode)
         if not details:
             return None
-        still = self.download_image(
+        still, still_url = self.download_image(
             details.get("still_path"), BACKDROP_SIZE,
             f"tmdb-tv-{show_tmdb_id}-s{season}e{episode}",
         )
@@ -276,6 +293,7 @@ class TmdbClient:
             "overview": details.get("overview") or None,
             "rating": details.get("vote_average") or None,
             "backdrop": still,
+            "backdrop_url": still_url,
             "meta_state": "done",
             "meta_source": "tmdb",
         }

@@ -1018,6 +1018,8 @@ class MusicPlayer(QObject):
         (which can't be changed) a dict copy of it with the new values.
         """
         item = _as_dict(track)
+        if item.get("friend"):
+            return                  # Liked Songs is yours: a friend's song can't be in it
         try:
             track_id = int(item["id"])
         except (KeyError, TypeError, ValueError):
@@ -1387,7 +1389,10 @@ class MusicPlayer(QObject):
             self._session_debounce.start()
 
     def _session_state(self) -> dict | None:
-        if not self._queue or self.current is None:
+        # A friend's songs are not this library's, and can't be brought back
+        # by id after a restart: with any in the queue, nothing is saved, and
+        # the last queue of your own stays the one that comes back.
+        if not self._queue or self.current is None or any(t.get("friend") for t in self._queue):
             return None
         return {
             "queue": [int(t["id"]) for t in self._queue],
@@ -1884,6 +1889,8 @@ class MusicPlayer(QObject):
         current = self.current
         if self._counted or self._restored or current is None or not self._duration:
             return
+        if current.get("friend"):
+            return                  # a friend's song: their play counts are their own
         if self._position >= min(self._duration * 0.5, 240.0):
             self._counted = True
             try:
