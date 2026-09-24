@@ -479,7 +479,9 @@ def main() -> int:
         # once, and a second one would ask again with nobody at the screen.
         # No QApplication, no library scan, no window — a socket and a sleep.
         # One at a time (background.claim), and it leaves when the updater asks.
-        from app import db
+        # db is the one imported at the top of this file. Importing it again
+        # here made it a local name for the whole of main(), and every start
+        # with a window failed at db.init() below (1.3.0).
         from app.share import background
         from app.share.sharer import run_background
 
