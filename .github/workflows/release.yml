@@ -186,9 +186,17 @@ jobs:
             exit 1
           }
           # The first line of the tag's own message becomes the line the updater
-          # shows people. An unannotated tag has none, and the version does.
+          # shows people. actions/checkout fetches every tag as it is, then
+          # fetches this one again as the bare commit (+<sha>:refs/tags/<tag>),
+          # which leaves it unannotated: 1.1.0 to 1.3.0 all went out with the
+          # tagged commit's title as their note. So fetch the tag object back
+          # first. An unannotated tag's "contents" are its commit's, never empty,
+          # so only the object's type says whether there is a message to use.
+          git fetch --force --no-tags origin "refs/tags/${env:TAG}:refs/tags/${env:TAG}"
           $note = git for-each-ref "refs/tags/$env:TAG" --format='%(contents:subject)'
-          if (-not $note) { $note = "Mistery ${{ steps.names.outputs.version }}" }
+          if ((git cat-file -t "refs/tags/$env:TAG") -ne "tag" -or -not $note) {
+            $note = "Mistery ${{ steps.names.outputs.version }}"
+          }
           Write-Host "release note: $note"
           # Through a file, not an argument: a tag message can hold a quote or an
           # ampersand, and those are the characters that turn one argument into
