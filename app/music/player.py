@@ -107,9 +107,11 @@ class AudioMpv(MpvProcess):
     def observed_properties(self) -> list[str]:
         # eof-reached only changes at the end of a file; the sleep timer's
         # "end of track" hears the song finish from it (see _check_sleep_end).
+        # seeking and paused-for-cache: a listening party's follower reports
+        # them to the room as buffering (app/party/listen_session.py).
         return ["path", "playlist-pos", "time-pos", "duration", "pause", "volume",
                 "mute", "idle-active", "eof-reached", "audio-params/samplerate",
-                "audio-params/format"]
+                "audio-params/format", "seeking", "paused-for-cache"]
 
     def _base_arguments(self, window_id: int | None) -> list[str]:
         return [
@@ -226,6 +228,9 @@ class MusicPlayer(QObject):
         self._repeat = str(settings.get("music_repeat", "off"))
         self._closing = False
         self._low_power = False
+        # A listening party (app/party/listen_session.py): while one is on, the
+        # buttons ask it instead of acting here (see set_party).
+        self._party = None
         # In background mode the position isn't streamed; it's asked for this
         # often instead, which is all play counting and Discord need.
         self._position_poll = QTimer(self)
@@ -359,6 +364,25 @@ class MusicPlayer(QObject):
         """Where the queue came from: {"kind", "title", "id"}, or None. Set by
         play_tracks / shuffle_tracks and kept until the next one."""
         return dict(self._context) if self._context else None
+
+    @property
+    def party(self):
+        """The listening party this player follows, or None."""
+        return self._party
+
+    def set_party(self, party) -> None:
+        """Follow a listening party, or stop following one (None).
+
+        While one is on, what a person does to the player (play, pause, skip,
+        seek, a new album, Play next, Add to queue) is asked of the party
+        rather than done here: the DJ's becomes the room's, and a guest's is
+        a vote, an added song, or their own pause. The party moves this
+        player itself, through the _party_* methods and mpv, never through
+        these. Shuffle and repeat stay off: the queue is everyone's.
+        """
+        self._party = party
+        self._apply_loop_modes()
+        self.state_changed.emit()
 
     @property
     def restored(self) -> bool:
@@ -544,7 +568,8 @@ class MusicPlayer(QObject):
         if mpv is None or not mpv.is_running:
             return
         waiting_for_end = self._sleep_mode in ("track", "queue")
-        mpv.set_property("loop-file", "inf" if self._repeat == "one" and not waiting_for_end else "no")
+        looping = self._repeat == "one" and not waiting_for_end and self._party is None
+        mpv.set_property("loop-file", "inf" if looping else "no")
         mpv.set_property("keep-open", "always" if self._sleep_mode == "track" else "no")
 
     # --- background playback ---------------------------------------------------
@@ -626,6 +651,8 @@ class MusicPlayer(QObject):
         {"kind": "album" | "artist" | "songs" | "liked" | "search" | "queue",
         "title": str, "id": int | str | None}.
         """
+        if self._party is not None and self._party.takes_over(tracks, start, context):
+            return
         items = [_as_dict(t) for t in tracks if (_as_dict(t).get("state") or "ready") == "ready"]
         if not items:
             return
@@ -647,6 +674,8 @@ class MusicPlayer(QObject):
 
     def shuffle_tracks(self, tracks: list, context: dict | None = None) -> None:
         """The Shuffle button: turn shuffle on and start somewhere random."""
+        if self._party is not None and self._party.takes_over(tracks, None, context, shuffle=True):
+            return
         items = [_as_dict(t) for t in tracks if (_as_dict(t).get("state") or "ready") == "ready"]
         if not items:
             return
@@ -660,13 +689,14 @@ class MusicPlayer(QObject):
         self.queue_changed.emit()
 
     def _rebuild(self, start: int, resume_at: float = 0.0, *, same_song: bool = False,
-                 paused: bool = False) -> None:
+                 paused: bool = False, hold: bool = False) -> None:
         """Give mpv the queue from `start`, and play.
 
         With `resume_at`, or `same_song` for a song picked up at 0:00, the
         song on show carries on: not announced again, play count kept.
         `paused` gives mpv the queue without playing it: a restored session's
-        preload (see _preload_restored).
+        preload (see _preload_restored). `hold` does the same for a listening
+        party, whose follower starts it on the room's clock: no preload.
         """
         if not self._ensure_mpv() or not (0 <= start < len(self._queue)):
             return
@@ -709,9 +739,14 @@ class MusicPlayer(QObject):
             # position as before — Play on one album, then Play on another, both
             # start at 0, and comparing positions made the second one invisible.
             self._set_index(start, force=True)
+            if hold and resume_at > 0:
+                # A listening party's song, opened where the room is: joining a
+                # party mid-song starts there, not at 0:00 and a seek after.
+                self._position = resume_at
+                self._anchor(resume_at)
         self._apply_loop_modes()
-        opened_at = resume_at if resuming else 0.0
-        if paused:
+        opened_at = resume_at if resuming or hold else 0.0
+        if paused or hold:
             # Before the file is opened, so none of it is played: mpv opens it
             # at `start` and holds it there. Measured, its first time-pos was
             # already the saved second, and time-pos stayed on it until Play.
@@ -724,6 +759,9 @@ class MusicPlayer(QObject):
             # this mpv goes before the song is played, Play opens it here again.
             self._preload = (start, opened_at)
             self._resume_at = opened_at
+            return
+        if hold:
+            self.state_changed.emit()
             return
         mpv.set_property("pause", False)
         # No optimistic "playing = True": mpv's own pause/idle events say when
@@ -756,12 +794,18 @@ class MusicPlayer(QObject):
             self.track_changed.emit(item)
 
     def toggle_pause(self) -> None:
+        if self._party is not None:
+            self._party.toggle()
+            return
         if self._playing:
             self.pause()
         else:
             self.play()
 
     def play(self) -> None:
+        if self._party is not None:
+            self._party.play()
+            return
         if not self._queue:
             return
         start = max(0, self._index)
@@ -795,10 +839,16 @@ class MusicPlayer(QObject):
         mpv.set_property("pause", False)
 
     def pause(self) -> None:
+        if self._party is not None:
+            self._party.pause()
+            return
         if self._mpv is not None and self._mpv.is_running:
             self._mpv.set_property("pause", True)
 
     def next(self) -> None:
+        if self._party is not None:
+            self._party.next()
+            return
         if not self._queue:
             return
         if self._index + 1 < len(self._queue):
@@ -813,6 +863,9 @@ class MusicPlayer(QObject):
             self._rebuild(0)
 
     def previous(self) -> None:
+        if self._party is not None:
+            self._party.previous()
+            return
         if not self._queue:
             return
         if self._position > _RESTART_THRESHOLD or self._index <= 0:
@@ -821,10 +874,16 @@ class MusicPlayer(QObject):
         self._rebuild(self._index - 1)
 
     def jump_to(self, index: int) -> None:
+        if self._party is not None:
+            self._party.jump(index)
+            return
         if 0 <= index < len(self._queue):
             self._rebuild(index)
 
     def seek(self, seconds: float) -> None:
+        if self._party is not None:
+            self._party.seek(seconds)
+            return
         seconds = max(0.0, float(seconds))
         mpv = self._mpv
         if self._preload is not None and self._loading and mpv is not None and mpv.is_running:
@@ -927,9 +986,58 @@ class MusicPlayer(QObject):
             # given rather than what we asked for (AudioMpv stops at 100).
             self._sent_volume = mpv.set_volume(value)
 
+    # --- a listening party's own moves (app/party/listen_session.py) -------------
+
+    def _party_load(self, entries: list[dict], index: int, position: float,
+                    context: dict | None) -> None:
+        """The party's queue, opened paused at `position` of entry `index`: the
+        follower starts it on the room's clock. Not a person's doing, so it
+        goes around the routing in play_tracks."""
+        entries = [dict(entry) if not isinstance(entry, dict) else entry for entry in entries]
+        if not entries or not 0 <= index < len(entries):
+            return
+        self._original = list(entries)
+        self._queue = list(entries)
+        self._in_order = True
+        self._context = dict(context) if isinstance(context, dict) else None
+        self._restored = False
+        self._rebuild(index, max(0.0, float(position)), same_song=True, hold=True)
+        self.queue_changed.emit()
+
+    def _party_set_queue(self, entries: list[dict], index: int) -> None:
+        """The party's queue changed around the song playing (a song added,
+        removed, or the window of it moved on): the song keeps playing, and mpv's
+        playlist after it is written again for gapless changes."""
+        current = self.current
+        if not entries or not 0 <= index < len(entries):
+            return
+        entries = list(entries)
+        if current is not None and current.get("party_e") == entries[index].get("party_e"):
+            entries[index] = current            # the very entry mpv is playing
+        self._queue = entries
+        self._original = list(entries)
+        self._index = index
+        self._resync_upcoming()
+        self.queue_changed.emit()
+
+    def _party_context(self, context: dict | None) -> None:
+        self._context = dict(context) if isinstance(context, dict) else None
+        self.queue_changed.emit()
+
+    def _party_untag(self) -> None:
+        """Forget which party entry each song was: a party's numbers mean nothing
+        to the next one, and a song still wearing entry 1 of the last party
+        passed for entry 1 of the new one."""
+        for entry in (*self._queue, *self._original):
+            entry.pop("party_e", None)
+            entry.pop("party_by", None)
+
     # --- queue editing ----------------------------------------------------------
 
     def play_next(self, track) -> None:
+        if self._party is not None:
+            self._party.add(track, next=True)
+            return
         item = _as_dict(track)
         if not self._queue:
             self.play_tracks([item], context=dict(_QUEUE_CONTEXT))
@@ -947,6 +1055,9 @@ class MusicPlayer(QObject):
         self.queue_changed.emit()
 
     def add_to_queue(self, track) -> None:
+        if self._party is not None:
+            self._party.add(track)
+            return
         item = _as_dict(track)
         if not self._queue:
             self.play_tracks([item], context=dict(_QUEUE_CONTEXT))
@@ -958,6 +1069,9 @@ class MusicPlayer(QObject):
         self.queue_changed.emit()
 
     def remove_upcoming(self, index: int) -> None:
+        if self._party is not None:
+            self._party.remove(index)
+            return
         if index <= self._index or index >= len(self._queue):
             return
         item = self._queue.pop(index)
@@ -972,6 +1086,9 @@ class MusicPlayer(QObject):
 
     def set_shuffle(self, enabled: bool, rebuild: bool = True) -> None:
         enabled = bool(enabled)
+        if self._party is not None:
+            self.state_changed.emit()       # the button goes back: a party's queue is everyone's
+            return
         if enabled == self._shuffle:
             return
         self._shuffle = enabled
@@ -997,6 +1114,9 @@ class MusicPlayer(QObject):
         self.state_changed.emit()
 
     def cycle_repeat(self) -> str:
+        if self._party is not None:
+            self.state_changed.emit()
+            return self._repeat
         order = ["off", "all", "one"]
         self._repeat = order[(order.index(self._repeat) + 1) % 3] if self._repeat in order else "off"
         settings.set("music_repeat", self._repeat)
@@ -1018,7 +1138,7 @@ class MusicPlayer(QObject):
         (which can't be changed) a dict copy of it with the new values.
         """
         item = _as_dict(track)
-        if item.get("friend"):
+        if item.get("friend") or item.get("party"):
             return                  # Liked Songs is yours: a friend's song can't be in it
         try:
             track_id = int(item["id"])
@@ -1392,7 +1512,8 @@ class MusicPlayer(QObject):
         # A friend's songs are not this library's, and can't be brought back
         # by id after a restart: with any in the queue, nothing is saved, and
         # the last queue of your own stays the one that comes back.
-        if not self._queue or self.current is None or any(t.get("friend") for t in self._queue):
+        if not self._queue or self.current is None or any(t.get("friend") or t.get("party")
+                                                          for t in self._queue):
             return None
         return {
             "queue": [int(t["id"]) for t in self._queue],
@@ -1779,7 +1900,8 @@ class MusicPlayer(QObject):
         if not stopped and self._sleep_mode == "queue":
             self._sleep_fire()
         held, self._sleep_hold = self._sleep_hold, False
-        if not stopped and self._pass_played and self._repeat == "all" and not held:
+        if not stopped and self._pass_played and self._repeat == "all" and not held \
+                and self._party is None:
             self._rebuild(0)
             return
         failed = not stopped and not self._pass_played
@@ -1889,7 +2011,7 @@ class MusicPlayer(QObject):
         current = self.current
         if self._counted or self._restored or current is None or not self._duration:
             return
-        if current.get("friend"):
+        if current.get("friend") or current.get("party"):
             return                  # a friend's song: their play counts are their own
         if self._position >= min(self._duration * 0.5, 240.0):
             self._counted = True

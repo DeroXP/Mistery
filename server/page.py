@@ -406,20 +406,26 @@ def _footer(config: Config, current: Current | None) -> str:
 # The script is forgiving about what arrives: a code retyped in lower case or
 # with spaces is still 65 letters and digits once the rest is dropped, and a
 # code's first character says what it is (app/party/invite.py: 1 a movie night,
-# 2 a friend, 3 a movie night on a friend's PC), so a friend's code on /join is
-# sent to /add rather than refused.
+# 2 a friend, 3 a movie night on a friend's PC, 4 a listening party), so a
+# friend's code on /join is sent to /add rather than refused, and a listening
+# party's /join page says so instead of "movie night".
 # Whether the code is real (its checksum) is for Mistery to say, not this page.
 
 LINK_SCRIPT = (
-    '(function(){function show(){'
+    '(function(){var heading=document.getElementById("heading"),lede=document.getElementById("lede"),'
+    'own=[document.title,heading.textContent,lede.textContent];function show(){'
     'var kind=document.body.getAttribute("data-kind"),hash=(location.hash||"").slice(1),raw;'
     'try{raw=decodeURIComponent(hash)}catch(e){raw=hash}'
     'raw=raw.toUpperCase().replace(/[^0-9A-Z]/g,"");'
     'var found=document.getElementById("found"),nocode=document.getElementById("nocode");'
     'document.getElementById("noscript").hidden=true;found.hidden=true;nocode.hidden=true;'
-    'if(!/^[123][0-9A-Z]{64}$/.test(raw)){nocode.hidden=false;return}'
+    'if(!/^[1234][0-9A-Z]{64}$/.test(raw)){nocode.hidden=false;return}'
     'var its=raw.charAt(0)==="2"?"add":"join",groups=raw.match(/.{5}/g),code=groups.join("-");'
     'if(its!==kind){location.replace("/"+its+"#"+code);return}'
+    'var words=raw.charAt(0)==="4"?["Join a listening party in Mistery","You\'re invited to a '
+    'listening party.","Open it in Mistery to join. The music plays from your friend\'s PC, in step '
+    'with everyone listening, each on their own PC."]:own;'
+    'document.title=words[0];heading.textContent=words[1];lede.textContent=words[2];'
     'var box=document.getElementById("code");box.textContent="";'
     'groups.forEach(function(g,i){if(i){box.appendChild(document.createTextNode("-"));'
     'box.appendChild(document.createElement("wbr"))}box.appendChild(document.createTextNode(g))});'
@@ -453,7 +459,7 @@ _LINK_WORDS = {
         "heading": "You're invited to a movie night.",
         "lede": ("Open it in Mistery to join. The film plays from your friend's PC, in step with "
                  "everyone watching, each on their own screen."),
-        "where": "In Mistery, press <b>Movie night</b> at the top of the window and paste it",
+        "where": "In Mistery, press <b>Movie night</b> in the menu on the left and paste it",
     },
 }
 
@@ -480,8 +486,8 @@ def render_link(kind: str, config: Config) -> str:
 <main>
   <section class="hero link-page">
     <div class="hero-text">
-      <h1>{_esc(words['heading'])}</h1>
-      <p class="lede">{_esc(words['lede'])}</p>
+      <h1 id="heading">{_esc(words['heading'])}</h1>
+      <p class="lede" id="lede">{_esc(words['lede'])}</p>
       <div id="found" hidden>
         <a id="open" class="download" href="/">
           <span class="download-main">Open in Mistery</span>

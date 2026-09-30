@@ -16,6 +16,10 @@ What a friend can ask for:
     night {kind, id}          a movie night of that film or episode on this PC,
                               for this PC's friends only: its code (nights.py);
           {at, party}         one again: from there, as the same party
+    listening {id, position,  which song of this library they are playing, so
+               playing, next} the Friends page can offer to join them; the
+                              answer carries a listening party's code once
+                              this PC has joined (presence.py)
     stop {token}              done with it
     bye                       goodbye
 
@@ -152,10 +156,18 @@ def _share(sock, peer, certificate: bytes | None, listener) -> None:
 def _answer(sock, friend, request: dict, listener, tokens: list[str]) -> None:
     kind = request.get("type")
     if kind == "hello":
-        _send(sock, {"type": "hello", "protocol": PROTOCOL,
-                     "person_id": ident.identity().person_id, "name": people.display_name(),
-                     "music": bool(settings.get("sharing_music", True)),
-                     "sharing": _sharing_with(friend)})
+        answer = {"type": "hello", "protocol": PROTOCOL,
+                  "person_id": ident.identity().person_id, "name": people.display_name(),
+                  "music": bool(settings.get("sharing_music", True)),
+                  "sharing": _sharing_with(friend)}
+        from . import presence
+
+        party = presence.party()
+        if party is not None and _sharing_with(friend):
+            # A listening party on this PC: a friend's Friends page offers to
+            # join it, with this code, in one click (app/party/listen_session.py).
+            answer["party"] = party
+        _send(sock, answer)
         return
     if not _sharing_with(friend):
         raise Refused(OFF if not settings.get("sharing_enabled") else PAUSED)
@@ -176,6 +188,12 @@ def _answer(sock, friend, request: dict, listener, tokens: list[str]) -> None:
         _send(sock, {"type": "stop"})
     elif kind == "ping":
         _send(sock, {"type": "pong", "at": time.time()})
+    elif kind == "listening":
+        # What they are playing of this library: the Friends page shows it, and
+        # joining them hands them a listening party's code in this answer.
+        from . import presence
+
+        _send(sock, presence.heard(friend, request))
     else:
         raise Refused("Their Mistery does not know that request.")
 

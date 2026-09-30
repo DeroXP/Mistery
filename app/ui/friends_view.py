@@ -139,6 +139,8 @@ class FriendRow(QFrame):
     browse = Signal(int)
     pause = Signal(int, bool)           # friend id, paused
     remove = Signal(int)
+    join_them = Signal(int)             # they are listening to your music: join them
+    join_party = Signal(int, str)       # their listening party: friend id, its code
 
     def __init__(self, friend, parent=None) -> None:
         super().__init__(parent)
@@ -182,11 +184,45 @@ class FriendRow(QFrame):
 
         self.library = _text("", 9.8, C.TEXT_DIM, rich=False)
         layout.addWidget(self.library)
+        # What they are listening to of yours, or their listening party: Join.
+        self.listen_row = QWidget()
+        listen = QHBoxLayout(self.listen_row)
+        listen.setContentsMargins(0, 2, 0, 0)
+        listen.setSpacing(12)
+        self.listen_text = QLabel()
+        self.listen_text.setStyleSheet(f"color: {C.ACCENT}; font-size: 9.8pt; font-weight: 600;")
+        listen.addWidget(self.listen_text, 1)
+        self.listen_button = _button("Join", "Primary")
+        self.listen_button.clicked.connect(self._join_listening)
+        listen.addWidget(self.listen_button)
+        self.listen_row.setVisible(False)
+        layout.addWidget(self.listen_row)
+        self._listen_action: tuple[str, str] | None = None
         self.detail = _text("", 9.2, C.TEXT_FAINT, rich=False)
         self.detail.setVisible(False)
         layout.addWidget(self.detail)
         self._state = "unknown"
         self.update_from(friend)
+
+    def set_listening(self, text: str, action: str | None = None, code: str = "") -> None:
+        """"Listening to Blue in Green from your music" (action "them"), or "Having a
+        listening party" (action "party", with its code); "" hides it."""
+        self._listen_action = (action, code) if text and action else None
+        self.listen_text.setText(text)
+        self.listen_button.setText("Join them" if action == "them" else "Join")
+        self.listen_button.setToolTip(
+            "Hear what they hear, in step with them: a listening party, with them as the DJ."
+            if action == "them" else "Join their listening party: their music, in step with them.")
+        self.listen_row.setVisible(bool(text and action))
+
+    def _join_listening(self) -> None:
+        action = self._listen_action
+        if action is None:
+            return
+        if action[0] == "them":
+            self.join_them.emit(self.friend_id)
+        elif action[0] == "party" and action[1]:
+            self.join_party.emit(self.friend_id, action[1])
 
     def update_from(self, friend) -> None:
         """The row, from the friend's row in the library."""
@@ -252,6 +288,8 @@ class FriendsView(QWidget):
 
     friends_changed = Signal()          # added, removed or paused: the rest of the app may care
     open_friend = Signal(int)           # their library, please (app/ui/friend_library_view.py)
+    join_them = Signal(int)             # a friend listening to your music: join them
+    join_party = Signal(int, str)       # a friend's listening party: friend id, code
     # Answers from threads, back on Qt's thread.
     _code_ready = Signal(object)        # dict, see _make_code
     _added = Signal(object)             # a friend id, or the sentence saying why not
@@ -268,6 +306,7 @@ class FriendsView(QWidget):
         self._checked.connect(self._on_checked)
         self._switched.connect(self._on_switched)
         self._rows: dict[int, FriendRow] = {}
+        self._parties: dict[int, dict] = {}     # a friend's listening party, from their hello
         self._checked_at: dict[int, float] = {}
         self._checking: set[int] = set()
         self._code = ""
@@ -301,10 +340,12 @@ class FriendsView(QWidget):
         layout.addWidget(self._build_add())
         layout.addWidget(self._build_sharing())
         layout.addStretch(1)
-        # The night card follows the movie night while this page is on screen.
+        # The night card follows the movie night while this page is on screen,
+        # and each friend's row what they are listening to.
         self._night_timer = QTimer(self)
         self._night_timer.setInterval(2000)
         self._night_timer.timeout.connect(self._say_night)
+        self._night_timer.timeout.connect(self.say_listening)
         # Filled when first shown (showEvent), not here: the window makes this
         # page at launch, and reload() pulls in sharing's certificate code.
 
@@ -462,6 +503,12 @@ class FriendsView(QWidget):
             "Manager's Startup list.")
         self.background_box.toggled.connect(self._on_background_toggled)
         layout.addWidget(self.background_box)
+        self.presence_box = QCheckBox("Let friends see when I'm listening to their music")
+        self.presence_box.setToolTip(
+            "While you play a friend's songs, their Mistery shows what you're listening to, and "
+            "they can join you: a listening party, with you as the DJ.")
+        self.presence_box.toggled.connect(lambda on: self._set("share_presence", on))
+        layout.addWidget(self.presence_box)
         self.share_state = _text("", 9.8, C.TEXT_DIM, rich=False)
         layout.addWidget(self.share_state)
         explain = _text(
@@ -481,7 +528,8 @@ class FriendsView(QWidget):
         for box, key, default in ((self.share_box, "sharing_enabled", False),
                                   (self.music_box, "sharing_music", True),
                                   (self.awake_box, "sharing_keep_awake", True),
-                                  (self.background_box, "sharing_background", True)):
+                                  (self.background_box, "sharing_background", True),
+                                  (self.presence_box, "share_presence", True)):
             box.blockSignals(True)
             box.setChecked(bool(settings.get(key, default)))
             box.blockSignals(False)
@@ -495,6 +543,7 @@ class FriendsView(QWidget):
         self.reload()
         self.check_all()
         self._say_night()
+        self.say_listening()
         self._night_timer.start()
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -567,6 +616,8 @@ class FriendsView(QWidget):
                 row.browse.connect(self.open_friend.emit)
                 row.pause.connect(self._pause)
                 row.remove.connect(self._remove)
+                row.join_them.connect(self.join_them.emit)
+                row.join_party.connect(self.join_party.emit)
                 self._rows[friend_id] = row
             else:
                 row.update_from(friend)
@@ -815,12 +866,16 @@ class FriendsView(QWidget):
                     result = {"state": "gone"}
                     return
                 with client.Channel(friend) as channel:
+                    party = channel.hello().get("party")
+                    if isinstance(party, dict) and isinstance(party.get("code"), str):
+                        result["party"] = party
                     if channel.hello().get("sharing") is False:
                         result = {"state": "closed",
                                   "text": "They've paused sharing with you, or switched sharing "
                                           "off. Their library stays as you last saw it."}
                     else:
-                        result = {"state": "online", "changed": channel.refresh()}
+                        result = {"state": "online", "changed": channel.refresh(),
+                                  "party": result.get("party")}
             except client.Unreachable as problem:
                 # The client words it for a friend (client.unreachable_words).
                 result = {"state": "offline", "text": str(problem)}
@@ -845,6 +900,32 @@ class FriendsView(QWidget):
             return
         row.update_from(friend)
         row.set_state(result.get("state", "trouble"), result.get("text", ""))
+        party = result.get("party")
+        if isinstance(party, dict):
+            self._parties[friend_id] = party
+        else:
+            self._parties.pop(friend_id, None)
+        self.say_listening()
+
+    def say_listening(self) -> None:
+        """Each friend's row: what of your music they are listening to (they say so
+        every few seconds, app/share/presence.py), or their listening party."""
+        from ..share import presence
+
+        listening = {item.friend_id: item for item in presence.now()}
+        for friend_id, row in self._rows.items():
+            item = listening.get(friend_id)
+            party = self._parties.get(friend_id)
+            if item is not None:
+                song = item.title + (f" · {item.artist}" if item.artist else "")
+                row.set_listening(f"Listening to {song}, from your music"
+                                  + ("" if item.playing else " (paused)"), "them")
+            elif party is not None:
+                song = str(party.get("song") or "")
+                row.set_listening("Having a listening party" + (f": {song}" if song else ""),
+                                  "party", str(party.get("code") or ""))
+            else:
+                row.set_listening("")
 
     def _pause(self, friend_id: int, paused: bool) -> None:
         from ..share import sharer as share_sharer

@@ -59,6 +59,7 @@ class Tunnel(GuestProxy):
         self._tokens: collections.OrderedDict[int, str] = collections.OrderedDict()
         self._closed = threading.Event()
         self._pinger: threading.Thread | None = None
+        self.presence_unknown = False           # their Mistery predates "listening" reports
 
     def song_url(self, remote_id: int) -> str:
         return f"http://127.0.0.1:{self.port}/t/{int(remote_id)}"
@@ -141,6 +142,27 @@ class Tunnel(GuestProxy):
                 self._tokens.popitem(last=False)
             return token
 
+    def report(self, payload: dict) -> dict | None:
+        """Tell their PC which of their songs is playing here (app/share/presence.py),
+        on the channel the songs come through. Blocks for a round trip: a worker
+        thread's call. Their answer, or None: their Mistery does not know the
+        request (it is older), or their PC cannot be reached just now."""
+        if self.presence_unknown:
+            return None
+        with self._talk:
+            try:
+                channel = self._ensure_channel()
+                return channel.ask({"type": "listening", **payload}, expect="listening", timeout=10.0)
+            except client.ShareError as problem:
+                if "does not know that request" in str(problem):
+                    self.presence_unknown = True
+                else:
+                    self._drop_channel()
+                return None
+            except OSError:
+                self._drop_channel()
+                return None
+
     def _ensure_channel(self) -> client.Channel:
         """With _talk held."""
         if self._channel is None:
@@ -194,6 +216,12 @@ def tunnel(friend_id: int) -> Tunnel:
             found.start()
             _tunnels[int(friend_id)] = found
         return found
+
+
+def existing(friend_id: int) -> Tunnel | None:
+    """The friend's Tunnel if one is running; never starts one."""
+    with _lock:
+        return _tunnels.get(int(friend_id))
 
 
 def close_unused(in_use: set[int]) -> None:

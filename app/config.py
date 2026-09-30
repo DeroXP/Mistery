@@ -384,6 +384,9 @@ DEFAULTS: dict = {
     "sharing_background": True,     # keep serving friends while Mistery itself is closed
     "sharing_keep_awake": True,     # don't let the PC sleep while a friend is watching
     "sharing_max_streams": 3,       # how many friends can be watching this PC at once
+    # Tell a friend's PC which of their songs is playing here, so they can join
+    # in (a listening party with you as the DJ: app/share/presence.py).
+    "share_presence": True,
     "party_quality": "auto",        # auto | original | 1080p | 720p
     # No auto_update key here on purpose. Updates are MisteryUpdate.exe's job
     # and the switch lives in updater.json in the install folder, because the

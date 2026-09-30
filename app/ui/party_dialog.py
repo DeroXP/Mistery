@@ -1568,6 +1568,10 @@ class JoinDialog(_MovieNightDialog):
 
     IDLE, CONNECTING, FAILED, JOINED = "idle", "connecting", "failed", "joined"
 
+    # A listening party's code, pasted into this same box: the window joins it
+    # (app/party/listen_session.py), and this dialog steps aside.
+    listen_requested = Signal(str)
+
     def __init__(self, session, parent=None) -> None:
         super().__init__(session, "Join a movie night", parent)
         self.setWindowModality(Qt.WindowModality.WindowModal)
@@ -1745,6 +1749,18 @@ class JoinDialog(_MovieNightDialog):
             if show:
                 self._say(f"<span style='color:{C.DANGER}'>{html.escape(str(problem))}</span>")
             return None
+        if found.kind == invite.KIND_LISTEN:
+            canonical = invite.encode(found)
+            if text.strip() != canonical:
+                self.code_input.blockSignals(True)
+                self.code_input.setText(canonical)
+                self._last_length = len(canonical)
+                self.code_input.blockSignals(False)
+            self.code_input.setCursorPosition(0)
+            if show:
+                self._say(f"<span style='color:{C.SUCCESS}'>That's a listening party's code.</span> "
+                          "Join, and you'll hear their music in step with them.")
+            return canonical
         if found.kind not in invite.NIGHTS:
             # A friend code (the Friends page), which is the same 13 groups to
             # look at. Say which one it is rather than that it is wrong.
@@ -1807,6 +1823,12 @@ class JoinDialog(_MovieNightDialog):
         code = self._validate(show=True)
         if code is None:
             self.code_input.setFocus()
+            return
+        from ..party import invite
+
+        if invite.decode(code).kind == invite.KIND_LISTEN:
+            self.hide()
+            self.listen_requested.emit(code)
             return
         self.steps_done.setText("")
         self.steps_done.setVisible(False)

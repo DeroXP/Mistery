@@ -485,6 +485,49 @@ into a path, and they never see where your files are. Each thing they play gets
 its own token, which is handed back when they stop. **Pause** stops serving a
 friend for now. **Remove** forgets them, their library and your place in it.
 
+## Listening parties
+
+Listen to music together, each on your own PC, in step: what the DJ plays,
+everyone hears, at the same second.
+
+**Starting one.** Play something of yours, then press the people button on the
+player bar or on Now Playing (**Listen together**) and **Start listening
+party**. Your queue, from the song playing on, becomes the party's, and the
+music doesn't stop for it. Friends join with its code, pasted into the same
+**Join** box as a movie night's (or its link), or with one click from their
+Friends page, where your row says you're having one.
+
+**Joining a friend who's listening to your music.** When a friend plays songs
+from your library, their Mistery tells yours what they're on, every few
+seconds, over the connection the songs already come through. Home and their row
+on the Friends page then say what they're listening to, with **Join them**.
+Press it and your PC plays the same song from the same second, from your own
+files; their Mistery joins by itself a moment later, as the party's DJ. Their
+music doesn't stop or skip. They can turn this off with *Let friends see when
+I'm listening to their music*, on the Friends page.
+
+**Who does what.** The DJ plays, pauses, seeks, skips and puts on albums: the
+host, or the friend you joined. Everyone can add songs from the host's music
+(Add to queue and Play next, or the search in the party's panel), take off the
+songs they added, and vote to skip with Next: half the party skips a song. A
+guest's pause is their own: the party plays on, and play catches them up. Now
+Playing says who you're listening with and what everyone did ("Sam added Blue
+in Green"). Shuffle and repeat stay off during a party: the queue is everyone's.
+
+**Staying together.** The host's Mistery keeps the clock, as for movie night.
+Every player has the party's queue in its own playlist, so one song follows the
+next without a gap, and the room moves on at the same moment, dated to when the
+song ended. A player that has drifted is nudged by 3 % (the pitch is kept) or,
+past 0.75 s, sent to the right place. A player that starts mid-song (joining,
+catching up) is opened a moment ahead and started as the room reaches it.
+Measured with two players on one PC: 0–46 ms apart.
+
+**Security.** As for a movie night: one port, TLS with the host's certificate
+pinned in the code, and a 104-bit secret. A guest streams only the songs in the
+party's queue, each with a token of its own, and searches the host's music by
+title and artist; nothing they send is turned into a path. A movie night and a
+listening party can't both be hosted at once: they share the one port.
+
 ## Music
 
 Albums in your library folders appear under **Music** — Albums, Artists and

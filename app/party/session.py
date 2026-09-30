@@ -808,6 +808,12 @@ class PartySession(QObject):
         if self._role is not None:
             self.error.emit("A movie night is already on. End it before you start another.")
             return False
+        listening = getattr(self.parent(), "_listen", None)
+        if listening is not None and listening.role == "host":
+            # One port for friends to come in through, and one party on it.
+            self.error.emit("Your listening party is on, so a movie night can't start until it's "
+                            "over: the two share the one port friends come in through.")
+            return False
         fresh = db.get_media(int(item.id)) if item is not None and item.id else None
         if fresh is not None:
             item = MediaItem.from_row(fresh)

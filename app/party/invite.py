@@ -8,7 +8,8 @@ What it carries, in 65 characters of 5 bits (325 bits: 288 of them the
 addresses, port, token and pin, 2 spare, and the version and checksum):
 
     kind         what the code is: 1 a movie night invite, 2 a friend request
-                 (app/share/pairing.py). One layout for both, so a code pasted
+                 (app/share/pairing.py), 3 a movie night on a friend's PC,
+                 4 a listening party. One layout for all, so a code pasted
                  into the wrong box is recognised and named rather than
                  refused as a typo. A higher number is a layout this Mistery
                  does not know, and the person is told to update Mistery
@@ -66,18 +67,24 @@ KIND_PAIR = 2               # add a friend: the token is the one-time pairing se
 # so a guest shows this install's certificate when joining. A Mistery from
 # before 1.3 reads it as a newer code and says to update, which it must.
 KIND_FRIENDS = 3
-KINDS = (KIND_JOIN, KIND_PAIR, KIND_FRIENDS)
+# Join a listening party (app/party/listening.py): the token is that party's
+# password. Joined with the same Join box and link as a movie night, which it
+# tells apart by this. A Mistery from before 1.5 reads it as a newer code.
+KIND_LISTEN = 4
+KINDS = (KIND_JOIN, KIND_PAIR, KIND_FRIENDS, KIND_LISTEN)
 NIGHTS = (KIND_JOIN, KIND_FRIENDS)          # the kinds a movie night is joined with
 TOKEN_BYTES = 13            # 104 bits
 PIN_BYTES = 13              # 104 of the certificate SHA-256's 256 bits
 LINK_PREFIX = "mistery://join/"
-LINK_PREFIXES = {KIND_JOIN: LINK_PREFIX, KIND_PAIR: "mistery://add/", KIND_FRIENDS: LINK_PREFIX}
+LINK_PREFIXES = {KIND_JOIN: LINK_PREFIX, KIND_PAIR: "mistery://add/", KIND_FRIENDS: LINK_PREFIX,
+                 KIND_LISTEN: LINK_PREFIX}
 # Mistery's website. "Copy link" hands out a link to a page there, because a
 # chat makes an https:// link clickable and a mistery:// one not. The page reads
 # the code from after the #, which a browser never sends, so the site never sees
 # it, and offers to open the mistery:// link.
 SITE = "https://mistery.up.railway.app"
-WEB_PAGES = {KIND_JOIN: SITE + "/join#", KIND_PAIR: SITE + "/add#", KIND_FRIENDS: SITE + "/join#"}
+WEB_PAGES = {KIND_JOIN: SITE + "/join#", KIND_PAIR: SITE + "/add#", KIND_FRIENDS: SITE + "/join#",
+             KIND_LISTEN: SITE + "/join#"}
 
 ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _VALUE = {c: i for i, c in enumerate(ALPHABET)}

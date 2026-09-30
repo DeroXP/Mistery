@@ -44,6 +44,7 @@ from .widgets.artview import ArtView
 from .widgets.icons import IconButton, icon_pixmap, paint_icon
 from .widgets.tracklist import TrackList
 from .widgets.volume_bar import VolumeBar
+from .listen_ui import PartyLine
 
 
 # Small capitals over a title: "PLAYING FROM ALBUM", "NEXT UP", the Details sections.
@@ -224,6 +225,17 @@ def _transport(player, size: int = 40) -> tuple[QHBoxLayout, dict]:
 
 def _sync_transport(buttons: dict, player) -> None:
     buttons["play"].set_playing(player.is_playing)
+    party = getattr(player, "party", None)
+    dj = party is None or party.is_dj
+    buttons["shuffle"].setEnabled(party is None)
+    buttons["repeat"].setEnabled(party is None)
+    buttons["previous"].setEnabled(dj)
+    buttons["next"].setToolTip("Next" if dj else "Vote to skip")
+    if party is not None and not dj:
+        buttons["play"].setToolTip("Catch up with the party" if party.tuned_out
+                                   else "Pause for you: the party plays on")
+    else:
+        buttons["play"].setToolTip("")
     for key in ("shuffle", "repeat"):
         buttons[key].blockSignals(True)
     buttons["shuffle"].setChecked(player.shuffle)
@@ -379,8 +391,9 @@ class LikeButton(IconButton):
         self.setChecked(liked)
         self.blockSignals(False)
         self.set_icon_name("heart_filled" if liked else "heart")
-        friends = bool(current and current.get("friend"))
-        self.setToolTip("A friend's song: Liked Songs is for your own" if friends else
+        friends = bool(current and (current.get("friend") or current.get("party")))
+        whose = "The party's song" if current and current.get("party") else "A friend's song"
+        self.setToolTip(f"{whose}: Liked Songs is for your own" if friends else
                         "Remove from Liked Songs" if liked else "Save to Liked Songs")
         self.setEnabled(current is not None and not friends)
         self.update()
@@ -520,6 +533,7 @@ _CONTEXT_CAPTIONS = {
     "playlist": "PLAYING FROM PLAYLIST",
     "queue": "PLAYING FROM",
     "friend": "PLAYING FROM A FRIEND'S LIBRARY",
+    "party": "LISTENING PARTY",
 }
 
 
@@ -535,6 +549,7 @@ class PlayingFrom(QWidget):
     artist_requested = Signal(str)
     context_requested = Signal(dict)
     queue_requested = Signal()
+    party_requested = Signal()          # a listening party's: its panel
 
     def __init__(self, player, parent=None) -> None:
         super().__init__(parent)
@@ -577,7 +592,8 @@ class PlayingFrom(QWidget):
         self._caption.setText(_CONTEXT_CAPTIONS.get(kind, "PLAYING FROM"))
         self._title.setText(title)
         self.setToolTip({"album": "Open the album", "artist": "Open the artist",
-                         "queue": "Show Up next"}.get(kind, f"Open {title}" if title else ""))
+                         "queue": "Show Up next", "party": "Open the listening party"}
+                        .get(kind, f"Open {title}" if title else ""))
         self.setVisible(True)
 
     def enterEvent(self, event) -> None:
@@ -615,6 +631,8 @@ class PlayingFrom(QWidget):
                 self.artist_requested.emit(str(name))
         elif kind == "queue":
             self.queue_requested.emit()
+        elif kind == "party":
+            self.party_requested.emit()
         else:
             self.context_requested.emit(dict(context))
 
@@ -1675,6 +1693,7 @@ class NowPlayingBar(QWidget):
     expand_requested = Signal(str)       # "" | "lyrics" | "queue" | "details"
     artist_requested = Signal(str)
     album_requested = Signal(int)
+    party_requested = Signal()           # Listen together: the listening party's panel
 
     # The two sides are the same width so the transport stays centred in the
     # window; they give up space (the slider first) on a narrow window.
@@ -1763,6 +1782,9 @@ class NowPlayingBar(QWidget):
         queue = IconButton("queue", size=36, icon_size=19, tooltip="Up next")
         queue.clicked.connect(lambda: self.expand_requested.emit("queue"))
         right_layout.addWidget(queue)
+        self.party_button = IconButton("people", size=36, icon_size=19, tooltip="Listen together")
+        self.party_button.clicked.connect(self.party_requested.emit)
+        right_layout.addWidget(self.party_button)
         right_layout.addSpacing(4)
         right_layout.addWidget(_sound_button(player, self))
         self.sleep = SleepTimerButton(player, size=36, icon_size=19)
@@ -1808,6 +1830,11 @@ class NowPlayingBar(QWidget):
 
     def _on_state(self) -> None:
         _sync_transport(self._buttons, self._player)
+        party = self._player.party
+        # Only the DJ moves a party's song; a guest's bar shows where it is.
+        self._seek.setEnabled(party is None or party.is_dj)
+        self.party_button.setToolTip("Listening party: " + party.listeners_text() if party is not None
+                                     else "Listen together")
 
     def _on_position(self, position: float, duration: float) -> None:
         if not self.isVisible():
@@ -1842,7 +1869,7 @@ class NowPlayingBar(QWidget):
         current = self._player.current
         # A friend's artist has no page in this library: their album is where
         # "Playing from" goes.
-        if current and not current.get("friend"):
+        if current and not current.get("friend") and not current.get("party"):
             self.artist_requested.emit(current.get("album_artist_name") or current.get("album_artist")
                                        or current.get("artist") or "")
 
@@ -1873,6 +1900,7 @@ class NowPlayingView(QWidget):
     # The lyrics screensaver asking the window for the whole screen, and giving
     # it back. See ui/screensaver.py.
     fullscreen_requested = Signal(bool)
+    party_requested = Signal()          # Listen together, or the party's line: its panel
 
     TABS = ("lyrics", "queue", "details")
 
@@ -1904,8 +1932,13 @@ class NowPlayingView(QWidget):
         self.playing_from.artist_requested.connect(self.artist_requested)
         self.playing_from.context_requested.connect(self.context_requested)
         self.playing_from.queue_requested.connect(lambda: self.show_tab("queue"))
+        self.playing_from.party_requested.connect(self.party_requested)
         top.addWidget(self.playing_from, 1, Qt.AlignmentFlag.AlignVCenter)
         top.addSpacing(16)
+        self.listen_button = IconButton("people", size=38, icon_size=20, tooltip="Listen together")
+        self.listen_button.clicked.connect(self.party_requested.emit)
+        top.addWidget(self.listen_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addSpacing(10)
         self._tabs = QButtonGroup(self)
         self._tabs.setExclusive(True)
         for index, label in enumerate(("Lyrics", "Up next", "Details")):
@@ -1925,6 +1958,10 @@ class NowPlayingView(QWidget):
         self._top_row = QWidget()
         self._top_row.setLayout(top)
         root.addWidget(self._top_row)
+        # Who you are listening with, while a listening party is on.
+        self.party_line = PartyLine(player)
+        self.party_line.clicked.connect(self.party_requested.emit)
+        root.addWidget(self.party_line)
 
         body = QHBoxLayout()
         body.setSpacing(56)
@@ -2044,6 +2081,8 @@ class NowPlayingView(QWidget):
         _sync_transport(self._buttons, player)
         self.vinyl.set_playing(player.is_playing, animate=False)
         self.lyrics.set_playing(player.is_playing)
+        party = player.party
+        self._seek.setEnabled(party is None or party.is_dj)
 
     def show_tab(self, name: str) -> None:
         index = self.TABS.index(name) if name in self.TABS else 0
@@ -2085,6 +2124,7 @@ class NowPlayingView(QWidget):
         # to put the state back itself rather than go through the window.
         self._was_maximized = self.window().isMaximized()
         self._top_row.setVisible(False)
+        self.party_line.setVisible(False)
         self._left_holder.setVisible(False)
         self._side.setVisible(False)
         if self._asked_fullscreen:
@@ -2092,6 +2132,7 @@ class NowPlayingView(QWidget):
 
     def _on_screensaver_left(self) -> None:
         self._top_row.setVisible(True)
+        self.party_line.refresh()
         self._left_holder.setVisible(True)
         self._side.setVisible(True)
         self._shown_second = -1
@@ -2140,6 +2181,8 @@ class NowPlayingView(QWidget):
         _sync_transport(self._buttons, self._player)
         self.vinyl.set_playing(self._player.is_playing)
         self.lyrics.set_playing(self._player.is_playing)
+        party = self._player.party
+        self._seek.setEnabled(party is None or party.is_dj)
 
     def _on_track(self, track) -> None:
         if not track:

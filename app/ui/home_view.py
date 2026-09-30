@@ -17,6 +17,7 @@ from ..metadata import categories as cat
 from ..models import MediaItem, ShowItem
 from ..util import fmt_clock, progress_fraction
 from .friend_library_view import FriendItem, friend_continue_items, friend_night_item
+from .listen_ui import ListeningCard
 from .party_dialog import and_list, when_text
 from .theme import C
 from .widgets.artview import ArtView
@@ -310,6 +311,7 @@ class HomeView(QWidget):
     friend_together_requested = Signal(object)      # its menu's Watch together (app/share/nights.py)
     search_requested = Signal()                     # the search pill in the greeting
     mood_see_all = Signal(list)                     # the time-of-day shelf's See all: its categories
+    join_listening = Signal(int)                    # a friend on your music: join them (listen_ui)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -338,6 +340,11 @@ class HomeView(QWidget):
         self.header = HomeHeader()
         self.header.search_requested.connect(self.search_requested.emit)
         self._body.addWidget(self.header)
+
+        # A friend listening to your music right now, and a way to join them.
+        self.listening = ListeningCard()
+        self.listening.join_requested.connect(self.join_listening.emit)
+        self._body.addWidget(self.listening)
 
         self.hero = HeroBanner()
         self.hero.play_requested.connect(self.play_requested.emit)

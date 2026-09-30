@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
     # opened stream or None, the sentence for the page when it is None).
     _friend_opened = Signal(object, object, str)
     _together_ready = Signal(object, str, str)      # FriendItem, its movie night's code, or why not
+    _presence_changed = Signal()                    # a friend started or stopped listening to our music
 
     def __init__(self) -> None:
         super().__init__()
@@ -91,6 +92,11 @@ class MainWindow(QMainWindow):
         self._party = None
         self._host_dialog: HostDialog | None = None
         self._join_dialog: JoinDialog | None = None
+        # Listening parties (app/party/listen_session.py): the session, its panel,
+        # and what tells friends which of their songs play here.
+        self._listen = None
+        self._listen_panel = None
+        self._presence_reporter = None
 
         # The pages to the right of a strip kept free for the sidebar, which
         # floats over that strip and, while it is open, over the page's edge.
@@ -208,6 +214,9 @@ class MainWindow(QMainWindow):
         # Library sharing, when it is on: the port friends reach. Nothing at
         # all while it is off, which is how it starts.
         QTimer.singleShot(2500, self, self._start_sharing)
+        # Friends listening to this library's music (share/presence.py), and
+        # telling friends which of theirs plays here.
+        QTimer.singleShot(3000, self, self._start_presence)
 
     @staticmethod
     def _start_sharing() -> None:
@@ -308,6 +317,7 @@ class MainWindow(QMainWindow):
         self.home.movie_nights.continue_requested.connect(self.continue_movie_night)
         self.home.movie_nights.forget_requested.connect(self._forget_movie_night)
         self.home.movie_nights.together_requested.connect(self.watch_together_again)
+        self.home.join_listening.connect(self.join_listening_friend)
 
         self.movies.shuffle_requested.connect(self._shuffle_films)
         for view in (self.movies, self.shows):
@@ -389,6 +399,8 @@ class MainWindow(QMainWindow):
         self.artist_page.back_requested.connect(self.go_back)
         self.artist_page.album_requested.connect(self.open_album)
         self.friends_page.open_friend.connect(self.open_friend_library)
+        self.friends_page.join_them.connect(self.join_listening_friend)
+        self.friends_page.join_party.connect(self.join_friend_party)
         self.friend_library.back_requested.connect(self.go_back)
         self.friend_library.play_requested.connect(self.play_friend)
         self._friend_opened.connect(self._on_friend_opened)
@@ -399,6 +411,8 @@ class MainWindow(QMainWindow):
         self.now_playing.album_requested.connect(self.open_album)
         self.now_playing.artist_requested.connect(self.open_artist)
         self.now_bar.expand_requested.connect(self.open_now_playing)
+        self.now_bar.party_requested.connect(self.show_listening_party)
+        self.now_playing.party_requested.connect(self.show_listening_party)
         self.now_bar.album_requested.connect(self.open_album)
         self.now_bar.artist_requested.connect(self.open_artist)
         # "Playing from …" on Now Playing: an album or an artist comes through
@@ -1502,7 +1516,90 @@ class MainWindow(QMainWindow):
     def _join_panel(self) -> JoinDialog:
         if self._join_dialog is None:
             self._join_dialog = JoinDialog(self.party_session(), self)
+            # A listening party's code, pasted into the same box: joined there.
+            self._join_dialog.listen_requested.connect(self.join_listening_code)
         return self._join_dialog
+
+    # --- listening parties ----------------------------------------------------
+
+    def listening_session(self):
+        """This window's listening party (app/party/listen_session.py), made when
+        first needed."""
+        if self._listen is None:
+            from ..party.listen_session import ListeningSession
+
+            self._listen = ListeningSession(self.music, self)
+            self._listen.error.connect(self._on_status)
+            self._listen.ended.connect(lambda reason: self._on_status(reason) if reason else None)
+        return self._listen
+
+    def _listening_panel(self):
+        if self._listen_panel is None:
+            from .listen_ui import ListenPanel
+
+            self._listen_panel = ListenPanel(self.listening_session(), self.music, self)
+            self._listen_panel.join_code_requested.connect(self.join_movie_night)
+        return self._listen_panel
+
+    def show_listening_party(self) -> None:
+        """Listen together on the now bar and Now Playing: the party's panel,
+        ready to start one, or the one that is on."""
+        panel = self._listening_panel()
+        panel.open_fresh()
+        self._show_dialog(panel)
+
+    def join_listening_friend(self, friend_id: int) -> None:
+        """Join them, for a friend listening to this library's music: a party on
+        this PC with them as the DJ, from where their song has got to."""
+        from ..share import presence
+
+        item = presence.of(friend_id)
+        if item is None:
+            self._on_status(f"{presence.friend_named(friend_id)} has stopped listening.")
+            self._on_presence()
+            return
+        if self.listening_session().join_them(item):
+            self.show_listening_party()
+
+    def join_friend_party(self, friend_id: int, code: str) -> None:
+        """A friend's listening party, from their row on the Friends page."""
+        if self.listening_session().join(code, friend_id=friend_id):
+            self.show_listening_party()
+
+    def join_listening_code(self, code: str) -> None:
+        """A listening party's code, from the Join box."""
+        if self.listening_session().join(code):
+            self.show_listening_party()
+
+    def _start_presence(self) -> None:
+        from ..party.listen_session import PresenceReporter
+        from ..share import presence
+
+        self._presence_reporter = PresenceReporter(self.music, self)
+        self._presence_reporter.join_offered.connect(self._on_join_offered)
+        presence.watchers.append(self._presence_changed.emit)
+        self._presence_changed.connect(self._on_presence)
+        # Nobody says when they stop (a PC turned off): what they said wears out.
+        self._presence_timer = QTimer(self)
+        self._presence_timer.setInterval(5000)
+        self._presence_timer.timeout.connect(self._on_presence)
+        self._presence_timer.start()
+
+    def _on_presence(self) -> None:
+        from ..share import presence
+
+        # In a party already (with them, most likely): nothing to join.
+        busy = self._listen is not None and self._listen.role is not None
+        self.home.listening.set_listening([] if busy else presence.now())
+        if self.friends_page.isVisible():
+            self.friends_page.say_listening()
+
+    def _on_join_offered(self, friend_id: int, code: str, name: str) -> None:
+        """The friend whose music this is joined us: into their party, quietly,
+        with the music we are hearing carrying on."""
+        session = self.listening_session()
+        if session.role is None:
+            session.join(code, friend_id=friend_id, quiet=True)
 
     def _show_dialog(self, dialog) -> None:
         dialog.show()
