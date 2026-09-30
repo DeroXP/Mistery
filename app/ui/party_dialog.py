@@ -639,7 +639,7 @@ class _Disclosure(QWidget):
 _STYLE = f"""
 QDialog#MovieNight {{ background: {C.BG_ELEV}; }}
 #Eyebrow {{ color: {C.ACCENT}; font-size: 9pt; font-weight: 700; letter-spacing: 1.2px; }}
-#CodeBox, #StatusBox, #StepsBox, #NoteBox {{
+#CodeBox, #StatusBox, #StepsBox, #NoteBox, #PhoneBox {{
     background: {C.BG};
     border: 1px solid {C.BORDER};
     border-radius: 16px;
@@ -764,6 +764,48 @@ class _MovieNightDialog(QDialog):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff if wanted <= limit
             else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setFixedHeight(max(200, min(wanted, limit)))
+
+
+class _QrCode(QWidget):
+    """A QR code (app/party/qr.py), dark on white with its quiet zone of four
+    modules, `module` pixels a module: a camera reads dark on light, not the
+    panel's own light on dark."""
+
+    def __init__(self, module: int = 4, parent=None) -> None:
+        super().__init__(parent)
+        self._module = module
+        self._matrix: list[list[bool]] = []
+        self.text = ""
+
+    def set_text(self, text: str) -> None:
+        if text == self.text:
+            return
+        from ..party import qr
+
+        self.text = text
+        try:
+            self._matrix = qr.encode(text) if text else []
+        except qr.QRError:
+            self._matrix = []
+        side = (len(self._matrix) + 8) * self._module if self._matrix else 0
+        self.setFixedSize(side, side)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if not self._matrix:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawRoundedRect(QRectF(self.rect()), 10, 10)      # inside the quiet zone
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        size, dark = self._module, QColor("#000000")
+        for row, line in enumerate(self._matrix):
+            for column, on in enumerate(line):
+                if on:
+                    painter.fillRect((column + 4) * size, (row + 4) * size, size, size, dark)
+        painter.end()
 
 
 def _box(name: str, margins=(20, 16, 20, 16), spacing: int = 10) -> tuple[QFrame, QVBoxLayout]:
@@ -910,6 +952,10 @@ class HostDialog(_MovieNightDialog):
         self._copied_timer.setSingleShot(True)
         self._copied_timer.setInterval(3500)
         self._copied_timer.timeout.connect(lambda: self.copied.setVisible(False))
+        self._phone_copied_timer = QTimer(self)
+        self._phone_copied_timer.setSingleShot(True)
+        self._phone_copied_timer.setInterval(3500)
+        self._phone_copied_timer.timeout.connect(lambda: self.phone_copied.setVisible(False))
 
         # --- ready: what is about to happen ------------------------------------
         self.ready_panel = QWidget()
@@ -1077,6 +1123,40 @@ class HostDialog(_MovieNightDialog):
         self.bandwidth = _text("", 9.5, C.TEXT_FAINT, rich=False)
         room.addWidget(self.bandwidth)
         running.addLayout(room)
+
+        # --- running: watching on a phone -------------------------------------------
+        # The phone's camera opens the link in the QR code: a page on this PC
+        # (app/party/phone.py) that plays the film in step and joins the room.
+        self.phone_box, phone = _box("PhoneBox", margins=(18, 18, 20, 18), spacing=0)
+        phone_row = QHBoxLayout()
+        phone_row.setSpacing(18)
+        self.phone_qr = _QrCode(4)
+        phone_row.addWidget(self.phone_qr, 0, Qt.AlignmentFlag.AlignTop)
+        phone_words = QVBoxLayout()
+        phone_words.setSpacing(8)
+        phone_title = QLabel("WATCH ON YOUR PHONE")
+        phone_title.setStyleSheet(f"color: {C.TEXT_FAINT}; font-size: 8.5pt; font-weight: 700;"
+                                  " letter-spacing: 1.2px;")
+        phone_words.addWidget(phone_title)
+        self.phone_text = _text("", 9.8, C.TEXT_DIM)
+        phone_words.addWidget(self.phone_text)
+        phone_copy = QHBoxLayout()
+        phone_copy.setSpacing(10)
+        self.copy_phone = _button("Copy link", "Ghost")
+        self.copy_phone.setToolTip("The phone's link, to send to the phone another way: AirDrop, "
+                                   "or a message to yourself. It only works on this network.")
+        self.copy_phone.clicked.connect(self._copy_phone_link)
+        phone_copy.addWidget(self.copy_phone)
+        self.phone_copied = QLabel("Link copied.")
+        self.phone_copied.setStyleSheet(f"color: {C.SUCCESS}; font-weight: 600;")
+        self.phone_copied.setVisible(False)
+        phone_copy.addWidget(self.phone_copied)
+        phone_copy.addStretch(1)
+        phone_words.addLayout(phone_copy)
+        phone_words.addStretch(1)
+        phone_row.addLayout(phone_words, 1)
+        phone.addLayout(phone_row)
+        running.addWidget(self.phone_box)
 
         self.help = _Disclosure("If friends can't get in")
         running.addWidget(self.help)
@@ -1373,6 +1453,7 @@ class HostDialog(_MovieNightDialog):
         self.bandwidth.setText(per_friend_line(session.needed_mbps))
         self.bandwidth.setVisible(bool(self.bandwidth.text()))
         tunnel = (status.vpn if status else None) or (facts.vpn if facts else None)
+        self._refresh_phone(tunnel)
         # A VPN on is said where it shows, forward or no forward; "lan" with a
         # VPN is already the VPN's own sentence, so not twice there.
         said = bool(tunnel) and not (status is not None and status.state == "lan")
@@ -1397,6 +1478,36 @@ class HostDialog(_MovieNightDialog):
         # their own size on the right (hidden, the three grew to fill the row).
         self.footer_note.setText("" if playable else "Closing this window keeps the movie night going.")
         self._pick_default()
+
+    def _refresh_phone(self, tunnel: str | None) -> None:
+        """The QR code a phone opens to watch, or why a phone can't."""
+        session = self.session
+        link = getattr(session, "phone_link", "")
+        self.phone_box.setVisible(bool(link))
+        if not link:
+            return
+        playable = bool(getattr(session, "can_transcode", False))
+        self.phone_qr.set_text(link if playable else "")
+        self.phone_qr.setVisible(playable)
+        self.copy_phone.setVisible(playable)
+        if not playable:
+            self.phone_text.setText("Phones can watch too, once Mistery can make a stream they play: that "
+                                    "needs ffmpeg, which this PC doesn't have.")
+            return
+        words = ("Point your phone's camera at this to watch there too. It joins like a friend: pause, "
+                 "play and skip work for everyone. The phone has to be on the same network as this PC, "
+                 "your home Wi-Fi.")
+        if tunnel:
+            words += (f" If the page won't open, {html.escape(vpn_name(tunnel))} may be keeping the phone "
+                      "out: allow local network access in it, or pause it.")
+        self.phone_text.setText(words)
+
+    def _copy_phone_link(self) -> None:
+        link = getattr(self.session, "phone_link", "")
+        if link:
+            QGuiApplication.clipboard().setText(link)
+            self.phone_copied.setVisible(True)
+            self._phone_copied_timer.start()
 
     def _can_play(self) -> bool:
         """Friends are in and the room is held where it is, at the start or

@@ -1292,6 +1292,12 @@ class Hub:
         return self._events.drain()
 
     @property
+    def ending(self) -> str | None:
+        """Why the room is over, once end() has been called (None before): a
+        phone's page (phone.py) offers no way back into a room that is gone."""
+        return self._ending
+
+    @property
     def guest_count(self) -> int:
         return sum(1 for p in self.people if not p["host"])
 
@@ -2096,14 +2102,19 @@ class Client:
         on = bool(on)
         self._loop.call(lambda: self._set_buffering(on))
 
-    def report_position(self, position: float, local: float | None = None) -> None:
+    def report_position(self, position: float, local: float | None = None,
+                        seq: int | None = None) -> None:
         """Where this player is, sent with the next ping so the host can show who is behind.
         Only a picture that is on screen, never one still opening: joining mid-film,
         this is also how the host learns the player has caught up with the room
-        (Hub._position_report), and so should wait for it from then on."""
+        (Hub._position_report), and so should wait for it from then on.
+
+        `seq` is the state the player was following, when that may not be the
+        latest this Client has heard (a phone's page, phone.py, hears it later)."""
         local = self._clock() if local is None else local
         try:
-            self._report = (float(position), self.host_time(local), self.state.seq)
+            self._report = (float(position), self.host_time(local),
+                            self.state.seq if seq is None else int(seq))
         except (TypeError, ValueError):
             pass
 

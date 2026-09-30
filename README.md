@@ -398,6 +398,20 @@ on the graphics card when it has an encoder: about 0.2 of a CPU core for a
 1080p episode, and 1.5 cores for 4K HDR tone-mapped down to 1080p. Audio
 track, subtitles and volume stay each person's own.
 
+**Watching on your phone.** The host panel shows a QR code. Point an iPhone's
+camera at it, with the phone on the same network as the PC, and a page opens
+in Safari. Type a name, press **Join**, and the film plays there in step with
+everyone, with nothing to install. The phone joins like a friend: it's in the
+list of who's watching, and its play, pause and seek are everyone's.
+Phones can't play most films as they are (HEVC, DTS, Matroska), so the PC makes
+H.264 1080p with stereo AAC as it goes, from wherever the room is. It's sent as
+HLS, which Safari plays by itself. Text subtitles come along, picked on the page
+or in Safari's full-screen player, and the sound is the track in your language
+(Settings → Playback). A phone that locks or leaves the page for a few seconds
+leaves the movie night, and joins again by itself when it comes back. Up to
+four phones at once; **Copy link** gives the same link to send to the phone
+another way.
+
 **Getting friends in.**
 - **At your place:** it works as soon as Windows lets Mistery use the network.
   It asks once; choose Allow. The host panel says which box to tick.
@@ -421,6 +435,13 @@ gets a bare 404 or a closed connection. Only the one file being watched, and the
 subtitle files named after it, can be reached: never the library, never any
 other file. When the night ends, the port closes and the router's mapping is
 removed. After a crash, that happens at the next start.
+
+The phone page is the one exception to TLS: a browser can't check the pin, and
+a certificate made for the evening would stop Safari at a warning page. So it
+is plain HTTP, answered only from your own network (a private address), only
+while the movie night runs, and only at the link's 128-bit token. Anyone with
+that link can watch and pause like a guest, so share it as you would the code.
+From the internet the port speaks nothing but TLS, as before.
 
 With library sharing on (below), the port belongs to sharing and stays open.
 A movie night then runs on sharing's listener instead of opening its own, using

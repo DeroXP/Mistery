@@ -652,6 +652,8 @@ class PartySession(QObject):
         self._status = ""
         self._room = None                   # the Hub (host) or the Client (guest)
         self._server = None
+        self._phones = None                 # host: phone.PhoneRoom, phones watching on this network
+        self._phone_link = ""               # ...and the link its QR code holds
         self._borrowed = False              # host: _server is library sharing's, lent
         self._mapping = None
         self._proxy = None
@@ -735,6 +737,25 @@ class PartySession(QObject):
                                     bool(settings.get("party_upnp", True)))
             status = self._port_status = replace(status, forwarded=forwarded, text=text)
         return status
+
+    @property
+    def phone_link(self) -> str:
+        """The host's: the link a phone on this network opens to watch
+        (http://<this PC>:<port>/p/<token>/), "" when there is none."""
+        return self._phone_link if self._role == "host" and self._phase == "on" else ""
+
+    @property
+    def phones_watching(self) -> int:
+        phones = self._phones
+        return phones.watching if phones is not None else 0
+
+    def _phone_file(self, key: str):
+        """(path, duration) of the room's media `key`, for a phone's stream; a
+        server thread asks."""
+        item = self._next_items.get(key)
+        if item is None or not item.path:
+            return None
+        return item.path, item.duration or None
 
     @property
     def media(self) -> dict:
@@ -897,6 +918,15 @@ class PartySession(QObject):
                        playing=False, on_event=self._sync_events(job.generation))
         made["hub"] = hub
         server.sync_handler = hub.accept
+        try:
+            # Phones on this network watch it too, from the page the host panel's
+            # QR code opens (phone.py). Never worth the movie night itself.
+            from . import phone as phone_mod
+
+            made["phones"] = phone_mod.PhoneRoom(hub, self._phone_file)
+            server.phone_handler = made["phones"]
+        except Exception as exc:
+            _log.warning("movie night: phones can't watch this one: %s", exc)
         if borrowed is not None:
             port = borrowed.port
             self._relay.status.emit(job.generation, "Finding your internet address…")
@@ -916,6 +946,8 @@ class PartySession(QObject):
             raise _Refused(str(exc)) from None
         made.update(port=port, status=status, code=code, link=invite.web_link(code), media=media,
                     default=default)
+        phones = made.get("phones")
+        made["phone_link"] = phones.link(lan, port) if phones is not None else ""
 
     def _open_port(self, port: int, lan: str | None, lent=None) -> tuple[PortStatus, object]:
         """Ask the router for the port while asking STUN for the internet address; the
@@ -996,6 +1028,8 @@ class PartySession(QObject):
         self._server = made["server"]
         self._borrowed = bool(made.get("borrowed"))
         self._room = made["hub"]
+        self._phones = made.get("phones")
+        self._phone_link = made.get("phone_link") or ""
         self._mapping = made.get("mapping")
         self._port = made["port"]
         self._port_status = made["status"]
@@ -1644,7 +1678,7 @@ class PartySession(QObject):
             self._save_progress()
         self._stop_follower()
         role, room, server, mapping, proxy = self._role, self._room, self._server, self._mapping, self._proxy
-        borrowed = self._borrowed
+        borrowed, phones = self._borrowed, self._phones
         back = self._way_back
         back = (back[0], back[1], self._stream_quality) if way_back and back is not None else None
         rejoining = self._rejoining
@@ -1662,7 +1696,7 @@ class PartySession(QObject):
         self._reset_state()
         self._way_back = back
         self._in_background(lambda: _stop_everything(role, room, server, mapping, proxy,
-                                                     borrowed=borrowed))
+                                                     borrowed=borrowed, phones=phones))
         self.changed.emit()
         if failed:
             self.error.emit(reason)
@@ -1679,7 +1713,7 @@ class PartySession(QObject):
             self._save_progress()
         self._stop_follower()
         role, room, server, mapping, proxy = self._role, self._room, self._server, self._mapping, self._proxy
-        borrowed = self._borrowed
+        borrowed, phones = self._borrowed, self._phones
         self._generation += 1
         self._save_timer.stop()
         self._renew_timer.stop()
@@ -1687,7 +1721,7 @@ class PartySession(QObject):
             self._player.set_party(None)
         self._reset_state()
         self._way_back = None
-        _stop_everything(role, room, server, mapping, proxy, quick=True, borrowed=borrowed)
+        _stop_everything(role, room, server, mapping, proxy, quick=True, borrowed=borrowed, phones=phones)
         self.ended.emit("")
 
     def _stop_follower(self) -> None:
@@ -1813,17 +1847,20 @@ from .media import media_for as _media_for  # noqa: E402,F401
 def _dismantle(made: dict) -> None:
     """A start that failed or was abandoned: everything it made, taken apart."""
     _stop_everything("host", made.get("hub"), made.get("server"), made.get("mapping"), None,
-                     borrowed=bool(made.get("borrowed")))
+                     borrowed=bool(made.get("borrowed")), phones=made.get("phones"))
 
 
 def _stop_everything(role, room, server, mapping, proxy, quick: bool = False,
-                     borrowed: bool = False) -> None:
+                     borrowed: bool = False, phones=None) -> None:
     """In the order sync.Hub asks for: the room first (every guest is told), then
     the listener, then the router. Blocking; a worker thread's, or shutdown's.
 
     borrowed: the listener is library sharing's, and goes back to it still
     open, with its friends' streams untouched. One of the movie night's own is
-    closed, and if sharing wanted the port meanwhile, it gets it now."""
+    closed, and if sharing wanted the port meanwhile, it gets it now.
+
+    phones: the host's phone.PhoneRoom. Its phones hear the end with everyone
+    else; after the listener it stops its ffmpeg and deletes the film's folder."""
     try:
         if role == "host":
             if room is not None:
@@ -1833,6 +1870,8 @@ def _stop_everything(role, room, server, mapping, proxy, quick: bool = False,
                 server.end_party()
             elif server is not None:
                 server.stop()
+            if phones is not None:
+                phones.close()
             from . import upnp
 
             if mapping is not None:

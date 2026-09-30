@@ -17,6 +17,12 @@ the first line decides:
                                     carries plain values only, not lists)
     MISTERY-SYNC/1 <token-hex>      handed to sync_handler(sock, peer)
 
+Phones are the one exception to TLS: a browser cannot check the pin, and a
+self-made certificate would stop Safari at a warning page. So while a movie
+night has a phone_handler (phone.py), a connection from this network (a
+private address) that starts with anything but a TLS handshake is read as
+plain HTTP, and only /p/<the phone token>/… is answered.
+
 Anything else, or a wrong token, is closed having said nothing useful: HTTP
 gets a 404 with no body, anything else just the close. The file served is only
 ever the one set_media() chose; nothing a guest sends is turned into a path.
@@ -196,6 +202,13 @@ def _subtitle_label(video: str, subtitle: str) -> tuple[str, str]:
     return (" ".join(words) or ext.lstrip(".").upper()), language
 
 
+def _phone_address(address: str) -> bool:
+    """Whether plain HTTP from here could be a phone watching (phone.on_lan)."""
+    from .phone import on_lan
+
+    return on_lan(address)
+
+
 def _parse_range(value: str, size: int) -> tuple[int, int] | None:
     """(first, last) byte for one `bytes=` range, or None when it cannot be served.
 
@@ -295,6 +308,9 @@ class PartyServer:
     def __init__(self, identity, token: bytes | str, port: int, bind: str = "0.0.0.0", *,
                  context: ssl.SSLContext | None = None, share_handler=None) -> None:
         self.sync_handler = None
+        # Phones watching the movie night (phone.PhoneRoom): plain HTTP from
+        # this network, for /p/<its token>/. None: no phone is answered.
+        self.phone_handler = None
         # Library sharing hands this listener a context of its own: the one
         # built on the install's lasting certificate, which also asks a friend's
         # Mistery for theirs (app/share/identity.py). A movie night on its own
@@ -480,6 +496,7 @@ class PartyServer:
             self._token = b""
             self._admit = None
             self.sync_handler = None
+            self.phone_handler = None
             self._media = None
             self._generation += 1
             stale = [c for c in self._connections.values() if c.generation is not None]
@@ -657,6 +674,16 @@ class PartyServer:
             # sent in 256 KB writes that fill segments anyway.
             raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             raw.settimeout(self.handshake_timeout)   # a deadline for the whole handshake
+            if self.phone_handler is not None and _phone_address(connection.address):
+                # A phone's browser speaks plain HTTP; TLS starts with a
+                # handshake record (0x16). Only looked at from this network,
+                # and only while a movie night here has phones to serve.
+                first = raw.recv(1, socket.MSG_PEEK)
+                if not first:
+                    return
+                if first != b"\x16":
+                    self._phone(raw, connection, peer)
+                    return
             conn = self._context.wrap_socket(raw, server_side=True, do_handshake_on_connect=False)
             connection.sock = conn
             if self._stopping.is_set():
@@ -793,6 +820,26 @@ class PartyServer:
         conn.settimeout(None)               # the channel keeps its own time
         handler(conn, peer, line, certificate)
         return True
+
+    def _phone(self, raw, connection: _Connection, peer) -> None:
+        """Plain HTTP from this network: a phone's page, or nothing. The head is
+        read under the same limits as anyone's; a target that is not the phone
+        handler's gets the bare 404 everything else gets."""
+        deadline = time.monotonic() + self.head_timeout
+        first = self._read_line(raw, deadline)
+        parts = first.split(b" ")
+        if len(parts) != 3 or parts[2] not in (b"HTTP/1.1", b"HTTP/1.0"):
+            raise _Refused("not a request")
+        method, target, _version = parts
+        headers = self._read_headers(raw, deadline)
+        handler = self.phone_handler
+        if handler is None or method not in (b"GET", b"HEAD", b"POST") or not handler.owns(target):
+            raw.settimeout(5.0)
+            raw.sendall(_NOT_FOUND)
+            raise _Refused("wrong token or path")
+        self._known(connection)
+        raw.settimeout(self.body_stall)
+        handler.serve(raw, method, target, headers, peer)
 
     # --- HTTP --------------------------------------------------------------------
 

@@ -74,6 +74,9 @@ MOVIE_NIGHT_MODULES = (
     "app.party.session", "app.party.server", "app.party.sync", "app.party.tls",
     "app.party.invite", "app.party.upnp", "app.party.stun", "app.party.guest_proxy",
     "app.party.transcode", "app.party.people", "app.ui.party_dialog",
+    # Phones watching (1.6.0): imported inside functions, when a movie night
+    # starts and when the host panel draws its QR code.
+    "app.party.phone", "app.party.phone_page", "app.party.qr",
     "cryptography.x509", "cryptography.hazmat.primitives.asymmetric.ec", "ssl",
 )
 
