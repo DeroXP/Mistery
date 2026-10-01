@@ -28,8 +28,8 @@ from .setup_common import (APP_EXE_NAME, APP_ID, APP_NAME, CREATE_NO_WINDOW,
                            UNINSTALLER_NAME, UPDATER_NAME, UPDATE_DIR_NAME,
                            Cancelled, InstallError, app_is_running, arp_key,
                            data_dir, desktop_dir, exe_in_use, folder_size,
-                           free_space, human_size, is_frozen, start_menu_dir,
-                           task_name)
+                           free_space, human_size, installed_version, is_frozen,
+                           start_menu_dir, task_name)
 from .shortcut import read_shortcut, write_shortcut
 from .tool_downloads import DOWNLOAD_BYTES, RUNTIME_BYTES, TOOLS
 
@@ -136,7 +136,9 @@ def check_target(folder: Path) -> str:
 
     marker = read_marker(folder)
     if marker.get("app") == APP_NAME:
-        was = marker.get("version") or "an unknown version"
+        # version.txt first: the marker says what was installed, which is not
+        # what is there once an update has been through.
+        was = installed_version(folder) or marker.get("version") or "an unknown version"
         return f"Replacing the Mistery {was} already in this folder."
     if (folder / APP_EXE_NAME).is_file():
         return "Replacing the Mistery already in this folder."

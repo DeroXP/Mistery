@@ -8,6 +8,9 @@ that hourly costs nothing worth measuring.
 A full run, in order:
 
     sweep       delete last run's .old files, now that nothing holds them
+    records     what the installer wrote down is made to say the version that
+                is installed: Windows' list of apps, and the file the
+                uninstaller reads (updater/arp). Again after an update.
     off switch  updater.json in the install folder, not the app's settings.
                 It stops --check-now as well: off means this program does not
                 talk to the update server, button or no button.
@@ -45,7 +48,7 @@ import time
 from pathlib import Path
 
 from . import apply as apply_files
-from . import download, keys, liveness, manifest, paths
+from . import arp, download, keys, liveness, manifest, paths
 from .manifest import Refused, Unreachable
 
 OK = 0
@@ -97,6 +100,11 @@ def run(check_only: bool = False) -> int:
     swept = apply_files.sweep(install)
     if swept:
         paths.log(f"swept {swept} leftover file(s) from the last update")
+
+    # Here, before anything below can end the run: the update that left the
+    # records stale was applied by an older MisteryUpdate.exe, and the run that
+    # notices is as likely as not one that finds Mistery open and goes no further.
+    _record_version(install)
 
     if not keys.trusted_keys():
         # Checked here as well as in manifest.verify(), because a build with no
@@ -220,9 +228,26 @@ def run(check_only: bool = False) -> int:
         if result.staged_updater else ""
     paths.log(f"updated {installed} -> {offered}: {result.replaced} file(s) "
               f"replaced, {result.added} added{staged}")
+    _record_version(install)
     paths.write_result({"installed": offered, "latest": offered, "available": False,
                         "applied": offered, "notes": body.get("notes", "")})
     return UPDATED
+
+
+def _record_version(install: Path) -> None:
+    """Make Settings > Apps, and the uninstaller's window, show the version
+    that is installed (updater/arp).
+
+    Nothing to do with whether an update worked: neither call raises, and
+    whatever could not be written is tried again by the next run.
+    """
+    version = paths.installed_version()
+    was = arp.refresh(install, version)
+    if was is not None:
+        paths.log(f"Windows' list of apps said {was or 'no version'}; it now says {version}")
+    was = arp.refresh_marker(install, version)
+    if was is not None:
+        paths.log(f"{arp.MARKER_NAME} said {was or 'no version'}; it now says {version}")
 
 
 def _delete(path: Path) -> None:

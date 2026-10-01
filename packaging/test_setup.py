@@ -38,6 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "packaging"))
+sys.path.append(str(ROOT))          # updater/, for the one check that it and the installer agree
 
 from installer import arp, task                              # noqa: E402
 from installer.setup_common import human_size                # noqa: E402
@@ -186,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         _test_install(args, payload, install_dir, test_root, task_name, arp_path,
                       decoy)
         _test_reinstall(args, payload, install_dir)
+        _test_update_listing(install_dir, arp_path)
         _test_bad_hash(test_root)
         _test_uninstall(args, install_dir, test_root, task_name, arp_path)
     finally:
@@ -625,6 +627,91 @@ def _test_reinstall(args, payload: Path, install_dir: Path) -> None:
     check((install_dir / "runtime" / "mpv.exe").stat().st_mtime_ns == before,
           "mpv was not downloaded and unpacked a second time")
     check("not downloaded again" in done.stdout, "and it said so")
+
+
+def _test_update_listing(install_dir: Path, arp_path: str) -> None:
+    """The updater has to find what this installer wrote, with no help.
+
+    MisteryUpdate.exe carries none of this package (updater/arp.py says why), so
+    the marker's name, the key it records, the values' names and kinds, and the
+    way the marker is written are agreed between two programs by nothing but
+    this check: install for real, then ask the updater's own code to make the
+    install's records say a newer version. Before there was any such code, an
+    install updated from 1.4.0 to 1.6.0 still read 1.4.0 in Windows' list, and
+    its uninstaller's window was titled "Remove Mistery 1.4.0".
+    """
+    print("\n-- an update keeps what the installer wrote down true")
+    from installer import setup_common, uninstall_steps
+    from installer.install_steps import check_target
+    from updater import arp as updater_arp
+
+    check(updater_arp.MARKER_NAME == setup_common.MARKER_NAME
+          and updater_arp.ARP_KEY == setup_common.ARP_KEY,
+          "the updater and the installer mean the same marker file and the same key")
+    check(updater_arp.entry_key(install_dir) == arp_path,
+          "the updater finds the key in the marker this install wrote",
+          str(updater_arp.entry_key(install_dir)))
+
+    marker_file = install_dir / setup_common.MARKER_NAME
+    version_file = install_dir / setup_common.VERSION_FILE_NAME
+    before = arp.read(arp_path)
+    marker_text = marker_file.read_text(encoding="utf-8")
+    version_bytes = version_file.read_bytes()
+    installed = str(before.get("DisplayVersion"))
+    check(setup_common.installed_version(install_dir) == installed
+          and json.loads(marker_text).get("version") == installed,
+          "version.txt, the entry and the marker start out saying the same version",
+          installed)
+    check(updater_arp.refresh(install_dir, installed) is None
+          and updater_arp.refresh_marker(install_dir, installed) is None
+          and arp.read(arp_path) == before
+          and marker_file.read_text(encoding="utf-8") == marker_text,
+          "records that already say the installed version are not written to")
+
+    # What an update leaves: a newer version.txt, and whatever was written at
+    # install time still saying the old one.
+    newer = installed + ".1"
+    version_file.write_text(newer + "\n", encoding="utf-8")
+    check(uninstall_steps.read_plan(install_dir).version == newer,
+          "the uninstaller's window is titled from version.txt, whatever the marker says",
+          uninstall_steps.read_plan(install_dir).version)
+    check(check_target(install_dir) == f"Replacing the Mistery {newer} already in this folder.",
+          "and an installer says which Mistery it is replacing from version.txt too",
+          check_target(install_dir))
+
+    was = updater_arp.refresh(install_dir, newer)
+    after = arp.read(arp_path)
+    check(was == installed and after.get("DisplayVersion") == newer,
+          "the updater makes Windows' list say the new version",
+          f"{was} -> {after.get('DisplayVersion')}")
+    # update\ is empty after an install and nothing is waiting to be swept, so
+    # the updater's count and the installer's are the same folder walk here.
+    counted = setup_common.folder_size(install_dir) // 1024
+    check(isinstance(after.get("EstimatedSize"), int)
+          and abs(after["EstimatedSize"] - counted) <= 2,
+          "with the folder's size as the installer counts it",
+          f"{after.get('EstimatedSize')} KB listed, {counted} KB counted")
+    ours = ("DisplayVersion", "EstimatedSize")
+    check({name: value for name, value in after.items() if name not in ours}
+          == {name: value for name, value in before.items() if name not in ours},
+          "and every other value is as the installer wrote it")
+
+    was = updater_arp.refresh_marker(install_dir, newer)
+    check(was == installed and marker_file.read_text(encoding="utf-8")
+          == json.dumps(dict(json.loads(marker_text), version=newer), indent=2),
+          "and the marker, the rest of it written back exactly as the installer wrote it",
+          f"{was} -> {json.loads(marker_file.read_text(encoding='utf-8')).get('version')}")
+    check(not list(install_dir.glob(setup_common.MARKER_NAME + ".*")),
+          "with no temporary file left beside it")
+
+    # Back to the version that is installed, which is what the uninstaller and
+    # the checks after this one expect to find.
+    version_file.write_bytes(version_bytes)
+    updater_arp.refresh(install_dir, installed)
+    updater_arp.refresh_marker(install_dir, installed)
+    check(arp.read(arp_path).get("DisplayVersion") == installed
+          and marker_file.read_text(encoding="utf-8") == marker_text,
+          "and both go back the same way")
 
 
 def _test_bad_hash(test_root: Path) -> None:

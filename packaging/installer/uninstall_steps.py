@@ -39,7 +39,7 @@ from . import arp, sharing, task
 from .setup_common import (APP_EXE_NAME, APP_NAME, CREATE_NO_WINDOW, MARKER_NAME,
                            UNINSTALLER_NAME, InstallError, arp_key, data_dir,
                            desktop_dir, exe_in_use, folder_size, human_size,
-                           is_frozen, start_menu_dir, task_name)
+                           installed_version, is_frozen, start_menu_dir, task_name)
 from .shortcut import read_shortcut
 
 Report = Callable[[str, float], None]
@@ -117,7 +117,9 @@ def read_plan(install_dir: Path) -> Plan:
     data = Path(marker["data_dir"]) if marker.get("data_dir") else data_dir()
     return Plan(
         install_dir=install_dir,
-        version=str(marker.get("version") or ""),
+        # What is installed now, which after an update is not what the marker
+        # was written with (setup_common.installed_version).
+        version=installed_version(install_dir) or str(marker.get("version") or ""),
         install_bytes=folder_size(install_dir),
         data_dir=data if data.is_dir() else None,
         data_bytes=folder_size(data),

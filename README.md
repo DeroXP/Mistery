@@ -420,7 +420,9 @@ another way.
   page. Once it's done, tick *I've forwarded port 42170 to this PC on my router*
   in Settings → Movie night, and the panel stops repeating the steps.
 - **A VPN** on the host PC usually hides your home address: pause it for the
-  evening, or let Mistery bypass it (split tunnelling).
+  evening, or let Mistery bypass it (split tunnelling). With NordVPN that takes
+  its Kill Switch off as well: left on, it blocks the very apps split
+  tunnelling lets past.
 - **Carrier-grade NAT:** some providers put many homes behind one address, and
   then nothing from outside can reach you. The panel says so plainly.
 

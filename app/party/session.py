@@ -1005,7 +1005,7 @@ class PartySession(QObject):
                               router, tunnel, forwarded), None
         if tunnel:
             text = (f"Your VPN ({tunnel}) is on, so Mistery can't find your internet address: pause "
-                    "it for movie night, or let Mistery bypass it (split tunnelling). Friends at your "
+                    f"it for movie night, or {upnp.bypass_words(tunnel)}. Friends at your "
                     "place can join now.")
         else:
             text = ("Mistery couldn't find your internet address, so friends elsewhere can't join "

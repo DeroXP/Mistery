@@ -53,6 +53,10 @@ UNINSTALLER_NAME = "Uninstall.exe"
 UPDATER_NAME = "MisteryUpdate.exe"
 APP_EXE_NAME = "Mistery.exe"
 
+# One line, the version. It comes with the app, and every update brings a new
+# one (updater/paths.py has the same name).
+VERSION_FILE_NAME = "version.txt"
+
 # Where the fetched mpv/ffmpeg go. app.config.runtime_dir() looks exactly here
 # (install folder\runtime), after PATH, so somebody with their own mpv keeps it.
 RUNTIME_DIR_NAME = "runtime"
@@ -219,6 +223,24 @@ def human_size(num_bytes: float) -> str:
             return f"{num_bytes / step:.1f} {unit}" if num_bytes < 100 * step \
                 else f"{num_bytes / step:.0f} {unit}"
     return f"{int(num_bytes)} B"
+
+
+def installed_version(folder: Path) -> str:
+    """The version of the Mistery in a folder, from its version.txt; "" if none.
+
+    That file and not the "version" in mistery-install.json. The marker is
+    written when Mistery is installed, and for a long time nothing wrote it
+    again: an install updated from 1.4.0 to 1.6.0 was "Mistery 1.4.0" to the
+    uninstaller's window and to an installer about to replace it. The updater
+    keeps the marker true now as well (updater/arp.py), but a folder it has not
+    been to since, or could not write to, still says what it started as.
+    """
+    try:
+        lines = (Path(folder) / VERSION_FILE_NAME).read_text(
+            encoding="utf-8").strip().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return lines[0].strip() if lines else ""
 
 
 def folder_size(folder: Path) -> int:

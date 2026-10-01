@@ -3,10 +3,14 @@ r"""Where the updater's world is, and the log that records what it did.
 Two folders matter and they are not the same folder:
 
   the install folder   %LOCALAPPDATA%\Programs\Mistery — the exe, version.txt,
-                       _internal\, runtime\. This is the only place the updater
-                       writes. It is per-user, so replacing files there needs no
-                       administrator prompt, which is what lets an update happen
-                       at 4am with nobody there to click one.
+                       _internal\, runtime\. This is the only folder the updater
+                       writes to. It is per-user, so replacing files there needs
+                       no administrator prompt, which is what lets an update
+                       happen at 4am with nobody there to click one. (Outside
+                       it, one thing: two values of this install's own line in
+                       Windows' list of apps, so that it says the version that
+                       is installed. arp.py, which keeps mistery-install.json
+                       in this folder saying it too.)
 
   the data folder      %APPDATA%\Mistery — library.db, settings.json (the only
                        copy of the user's TMDB key), 237 MB of artwork on the

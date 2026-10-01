@@ -22,7 +22,10 @@ data folder with MISTERY_DATA_DIR, and at a mutex name nothing else uses with
 MISTERY_TEST_MUTEX_NAME — needed because the mutex Mistery holds is per Windows
 user, and on the machine this was written on the real Mistery is usually open.
 The one scheduled task it registers is called MisteryUpdateTest-<pid> and is
-deleted before the script returns, whatever happens.
+deleted before the script returns, whatever happens. So is the one registry key
+it writes, which stands in for Windows' list of installed apps: it sits under
+HKCU\Software\Mistery\SetupTest, where the setup tests keep theirs, never in
+the list itself.
 """
 
 from __future__ import annotations
@@ -442,6 +445,9 @@ def main() -> int:
 
     mutex_name = f"Local\\MisteryUpdateTest-{pid}"
     task_name = f"MisteryUpdateTest-{pid}"
+    # Where this run's install is "listed": a key of its own beside the setup
+    # tests', which the updater is led to by the marker file, as on a real PC.
+    arp_key = rf"Software\Mistery\SetupTest\Uninstall\MisteryUpdate-{pid}"
     server = None
     task_registered = False
     try:
@@ -905,6 +911,199 @@ def main() -> int:
               "an updater that will not run does not get answered by an old file",
               json.dumps(answer))
 
+        # --- 12. what the installer wrote down, after an update -------------------
+        heading("What the installer wrote down: Windows' list of apps, and its marker")
+        import winreg
+
+        from installer import arp as setup_arp              # the installer's own writer
+        from installer import setup_common
+        from updater import arp as updater_arp
+
+        marker_file = install / "mistery-install.json"
+
+        check(updater_arp.MARKER_NAME == setup_common.MARKER_NAME
+              and updater_arp.ARP_KEY == setup_common.ARP_KEY,
+              "the updater and the installer mean the same marker file and the same key")
+
+        def listed() -> dict:
+            return setup_arp.read(arp_key)
+
+        def list_install(version: str, location: Path) -> None:
+            """The entry as install_steps.run writes it, under this run's key."""
+            setup_arp.write(arp_key, display_name="Mistery", version=version,
+                            publisher="Mistery", install_dir=location,
+                            uninstaller=location / "Uninstall.exe",
+                            icon=location / "Mistery.exe", estimated_bytes=4096,
+                            about_url="https://github.com/DeroXP/Mistery")
+
+        def mark(drop: tuple[str, ...] = (), **changes) -> None:
+            """mistery-install.json with every kind of value install_steps.run puts
+            in it: text, a time, a null, and the tools' hashes."""
+            marker = {
+                "app": "Mistery", "version": OLD_VERSION, "installed": 1759267200.25,
+                "install_dir": str(install), "data_dir": str(data),
+                "start_menu_shortcut": str(root / "StartMenu" / "Mistery.lnk"),
+                "desktop_shortcut": None, "update_task": "MisteryUpdateTest-marker",
+                "arp_key": arp_key, "app_id": "Mistery.Player.1",
+                "tools": {"mpv": "0" * 64, "ffmpeg": "f" * 64},
+            }
+            marker.update(changes)
+            marker_file.write_text(json.dumps(
+                {name: value for name, value in marker.items() if name not in drop},
+                indent=2), encoding="utf-8")
+
+        def stale() -> None:
+            """An install as an updater from before this left it: the files at
+            1.1.0, and both records still saying 1.0.0."""
+            list_install(OLD_VERSION, install)
+            mark()
+
+        def records() -> tuple:
+            """(what Windows' list says, what the marker says)."""
+            try:
+                marked = json.loads(marker_file.read_text("utf-8")).get("version")
+            except (OSError, ValueError):
+                marked = None
+            return listed().get("DisplayVersion"), marked
+
+        def kept_kilobytes() -> int:
+            """What uninstalling would give back, counted here rather than there."""
+            return sum(path.stat().st_size for path in install.rglob("*")
+                       if path.is_file()
+                       and path.relative_to(install).parts[0] != "update"
+                       and path.suffix not in (".old", ".part", ".new")) // 1024
+
+        def run_over(label: str, expect: int, entry, marked, *args: str) -> None:
+            """One run over an up-to-date install, and what the two records say after."""
+            code = updater.run(*args)
+            now = records()
+            check(code == expect and now == (entry, marked), label,
+                  f"exit {code} (wanted {expect}), the list says {now[0]}, the marker {now[1]}")
+
+        # The update itself: both records were written by the installer at 1.0.0.
+        restore()
+        served.write_bytes(good_manifest)
+        stale()
+        before = listed()
+        marker_before = json.loads(marker_file.read_text("utf-8"))
+        code = updater.run()
+        after = listed()
+        check(code == 10 and after.get("DisplayVersion") == NEW_VERSION,
+              "an update makes Windows' list say the new version",
+              f"exit {code}, {before.get('DisplayVersion')} -> {after.get('DisplayVersion')}")
+        counted = kept_kilobytes()
+        check(isinstance(after.get("EstimatedSize"), int)
+              and abs(after["EstimatedSize"] - counted) <= 2
+              and after["EstimatedSize"] != before.get("EstimatedSize"),
+              "and the size of the folder as it is now, less the files passing through",
+              f"{after.get('EstimatedSize')} KB listed, {counted} KB counted, "
+              f"{before.get('EstimatedSize')} KB before")
+        ours = ("DisplayVersion", "EstimatedSize")
+        check({name: value for name, value in after.items() if name not in ours}
+              == {name: value for name, value in before.items() if name not in ours}
+              and len(after) == len(before),
+              "and leaves every other value as the installer wrote it",
+              ", ".join(sorted(name for name in after if name not in ours)))
+        check(marker_file.read_text("utf-8")
+              == json.dumps(dict(marker_before, version=NEW_VERSION), indent=2),
+              "the marker says the new version too, the rest written back as it was read",
+              str(records()[1]))
+        check(not list(install.glob("mistery-install.json.*")),
+              "with no temporary file left beside it")
+        log_text = (install / "update.log").read_text("utf-8")
+        check(f"Windows' list of apps said {OLD_VERSION}; it now says {NEW_VERSION}" in log_text
+              and f"mistery-install.json said {OLD_VERSION}; it now says {NEW_VERSION}" in log_text,
+              "update.log says both", updater.last_log(2).replace("\n", " | "))
+
+        # What an install updated by an older MisteryUpdate.exe looks like: the
+        # files at 1.1.0, the records still at 1.0.0. Any later run puts them right.
+        stale()
+        run_over("stale records are put right by a run that has nothing to install",
+                 0, NEW_VERSION, NEW_VERSION)
+
+        stale()
+        handle = kernel32.CreateMutexW(None, False, mutex_name)
+        try:
+            run_over("and by a run that stops because Mistery is open",
+                     20, NEW_VERSION, NEW_VERSION)
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+        stale()
+        (install / "updater.json").write_text(json.dumps({
+            "manifest_url": f"{base_url}/manifest.json", "auto_update": False,
+        }, indent=2), encoding="utf-8")
+        requests_before = len(QuietHandler.served)
+        run_over("and with updates switched off", 20, NEW_VERSION, NEW_VERSION)
+        check(len(QuietHandler.served) == requests_before,
+              "which still asks the server nothing",
+              f"{len(QuietHandler.served) - requests_before} request(s)")
+        (install / "updater.json").write_text(json.dumps({
+            "manifest_url": f"{base_url}/manifest.json", "auto_update": True,
+        }, indent=2), encoding="utf-8")
+
+        # The installer wrote the folder as it was typed; the updater knows it
+        # resolved. One folder spelt two ways is still this install's entry.
+        stale()
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, arp_key, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ,
+                              str(install).upper() + "\\")
+        run_over("the same folder spelt another way is still this install's entry",
+                 0, NEW_VERSION, NEW_VERSION)
+
+        # Every way of it not being this install's entry leaves the entry alone.
+        # The marker is in this folder whatever the list says, and is put right.
+        elsewhere = root / "another-mistery"
+        elsewhere.mkdir()
+        for label, location in (("another folder", elsewhere),
+                                ("a folder that is not there", root / "long-gone")):
+            list_install(OLD_VERSION, location)
+            mark()
+            run_over(f"an entry that names {label} is left alone", 0, OLD_VERSION, NEW_VERSION)
+
+        stale()
+        setup_arp.remove(arp_key)
+        run_over("an entry that is not there is not made", 0, None, NEW_VERSION)
+        check(listed() == {}, "not even an empty one", str(listed()))
+
+        # And with no marker of the installer's own, nothing is looked for,
+        # nothing is written, and the file is left as it is.
+        list_install(OLD_VERSION, install)
+        marker_file.unlink()
+        run_over("with no mistery-install.json no entry is looked for", 0, OLD_VERSION, None)
+        check(not marker_file.exists() and "it now says" not in updater.last_log(),
+              "and no marker is made, and nothing logged", updater.last_log())
+        for label, write in (("a marker that is not Mistery's", lambda: mark(app="Something else")),
+                             ("a marker that cannot be read",
+                              lambda: marker_file.write_text("{ not json", encoding="utf-8"))):
+            write()
+            as_written = marker_file.read_bytes()
+            code = updater.run()
+            check(code == 0 and marker_file.read_bytes() == as_written
+                  and listed().get("DisplayVersion") == OLD_VERSION,
+                  f"{label} is left as it is, and names no entry",
+                  f"exit {code}, the list says {listed().get('DisplayVersion')}")
+
+        # The same code from source, for the answers that never reach the
+        # registry at all, which is the point of them.
+        mark(app="Something else")
+        check(updater_arp.entry_key(install) is None
+              and updater_arp.refresh(install, NEW_VERSION) is None
+              and updater_arp.refresh_marker(install, NEW_VERSION) is None,
+              "from source: a marker that is not Mistery's is nobody's entry")
+        mark(drop=("arp_key",))
+        check(updater_arp.entry_key(install) == setup_common.ARP_KEY,
+              "one with no key in it means Windows' own list, as the uninstaller reads it")
+        mark()
+        check(updater_arp.entry_key(install) == arp_key
+              and updater_arp.refresh(install, "") is None
+              and updater_arp.refresh(install, None) is None
+              and updater_arp.refresh_marker(install, "") is None
+              and updater_arp.refresh_marker(install, None) is None
+              and records() == (OLD_VERSION, OLD_VERSION),
+              "and no version to say is nothing to do")
+
         heading("Summary")
         failed = [label for ok, label, _ in results if not ok]
         print(f"{len(results) - len(failed)} passed, {len(failed)} failed")
@@ -929,6 +1128,10 @@ def main() -> int:
             subprocess.run(["schtasks", "/Delete", "/TN", task_name, "/F"],
                            capture_output=True, text=True)
             print(f"deleted the scheduled task {task_name}")
+        with contextlib.suppress(Exception):
+            from installer import arp as setup_arp
+            setup_arp.remove(arp_key)
+            setup_arp.prune_empty_parents(arp_key)
         with contextlib.suppress(Exception):
             (root / "test-signing.key").unlink(missing_ok=True)
 

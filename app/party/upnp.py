@@ -226,6 +226,29 @@ def vpn() -> str | None:
     return None
 
 
+def is_nordvpn(adapter: str | None) -> bool:
+    """Whether a VPN's adapter, as vpn() names it, is NordVPN's ("NordLynx
+    Tunnel" on the PC this was written on)."""
+    name = (adapter or "").lower()
+    return "nordlynx" in name or "nordvpn" in name
+
+
+def bypass_words(adapter: str | None) -> str:
+    """The other thing a host can do about a VPN than pause it, in the words
+    every sentence that offers it ends with: let Mistery go round it.
+
+    For NordVPN that is two settings, and the words name both. Its own help
+    page ("How Kill Switch and Split Tunneling interact in NordVPN") says the
+    Internet Kill Switch outranks split tunnelling: an app excluded from the
+    VPN is blocked all the same while the Kill Switch is on. A host sent to
+    split tunnelling alone would set it up, see the same panel as before, and
+    have nothing left to try.
+    """
+    if is_nordvpn(adapter):
+        return "let Mistery bypass it (split tunnelling, with its Kill Switch off)"
+    return "let Mistery bypass it (split tunnelling)"
+
+
 def _adapters() -> list[_Adapter]:
     """IPv4 adapters that are up, from Windows' GetAdaptersAddresses; [] elsewhere
     or if anything about it goes wrong (the callers all have a fallback)."""

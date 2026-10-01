@@ -175,10 +175,21 @@ def att_gateway(network: str | None, router: str | None) -> bool:
 def vpn_name(adapter: str | None) -> str:
     """What people call their VPN. Windows names the adapter, and NordVPN's is
     "NordLynx Tunnel", a name nobody would recognise as the app they installed."""
+    from ..party import upnp
+
     name = adapter or ""
-    if "nordlynx" in name.lower() or "nordvpn" in name.lower():
+    if upnp.is_nordvpn(name):
         return "NordVPN"
     return f"Your VPN ({name})" if name else "Your VPN"
+
+
+def vpn_bypass(adapter: str | None) -> str:
+    """What a host can do about that VPN besides pausing it: the words after
+    "or" in every sentence here that names one (upnp.bypass_words, which for
+    NordVPN names its Kill Switch as well as split tunnelling)."""
+    from ..party import upnp
+
+    return upnp.bypass_words(adapter)
 
 
 def look_up_network() -> NetworkFacts:
@@ -431,8 +442,8 @@ def port_view(status, facts: NetworkFacts | None, upnp_on: bool = True) -> PortV
     if status.state == "lan":
         if tunnel:
             text = (f"{html.escape(vpn_name(tunnel))} is on, so Mistery can't find your internet "
-                    "address: pause it for movie night, or let Mistery bypass it (split "
-                    "tunnelling). Then end this movie night and start it again: the new code "
+                    f"address: pause it for movie night, or {vpn_bypass(tunnel)}. "
+                    "Then end this movie night and start it again: the new code "
                     "will carry the address friends elsewhere need.")
         else:
             text = ("Mistery couldn't find your internet address, so this code only works on "
@@ -1458,8 +1469,8 @@ class HostDialog(_MovieNightDialog):
         # VPN is already the VPN's own sentence, so not twice there.
         said = bool(tunnel) and not (status is not None and status.state == "lan")
         self.vpn_line.setText(f"<b>{html.escape(vpn_name(tunnel))} is on.</b> If friends can't get "
-                              "in, pause it during movie night, or let Mistery bypass it (split "
-                              "tunnelling)." if said else "")
+                              f"in, pause it during movie night, or {vpn_bypass(tunnel)}."
+                              if said else "")
         self.vpn_line.setVisible(said)
         check = ""
         if view.how:
@@ -1608,8 +1619,7 @@ class HostDialog(_MovieNightDialog):
         self.starting_note.setText(firewall_note(facts))
         self.vpn_note.setText(VPN_LINE if not facts.vpn else
                               f"{html.escape(vpn_name(facts.vpn))} is on. If friends can't get "
-                              "in, pause it during movie night, or let Mistery bypass it (split "
-                              "tunnelling).")
+                              f"in, pause it during movie night, or {vpn_bypass(facts.vpn)}.")
         if self.state == self.RUNNING:
             self._refresh_running()
         self.fit()

@@ -17,7 +17,8 @@ router, checked), which gets round the tunnel's routes, but not round a VPN
 that drops everything outside its tunnel: asked that way, a PC with NordVPN's
 kill switch on got no answer at all in 2 s. Then the
 answer here is None, never the tunnel's, and friends elsewhere can only join
-once the VPN is paused or lets Mistery bypass it (upnp.vpn() names it).
+once the VPN is paused or lets Mistery bypass it (upnp.vpn() names it, and
+upnp.bypass_words() says what bypassing takes: for NordVPN, more than one switch).
 
 What goes out: a bare Binding request, with nothing about Mistery or the movie
 night in it, to Cloudflare's server and then, if that has not answered,

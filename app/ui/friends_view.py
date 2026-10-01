@@ -35,7 +35,7 @@ from ..config import settings
 # The movie night panel's pieces, so a friend code looks like an invite code.
 from .party_dialog import (
     _MONO, _STYLE, _AMBER, _Disclosure, _Dot, _Spinner, _box, _button, _text, and_list,
-    look_up_network, router_steps, split_code, vpn_name, when_text,
+    look_up_network, router_steps, split_code, vpn_bypass, vpn_name, when_text,
 )
 from .theme import C
 
@@ -114,8 +114,8 @@ def reach_view(port: int, lan: str | None, wan: str | None, vpn: str | None,
     if not wan:
         if vpn:
             text = (f"{html.escape(vpn_name(vpn))} is on, so Mistery can't find your internet "
-                    "address and this code works at your place only. Pause it (or let Mistery "
-                    "bypass it), then press Make a new code.")
+                    "address and this code works at your place only. Pause it, or "
+                    f"{vpn_bypass(vpn)}, then press Make a new code.")
         else:
             text = ("Mistery couldn't find your internet address, so this code works at your "
                     "place only. Check that you're online, then press Make a new code.")
