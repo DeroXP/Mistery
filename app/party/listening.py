@@ -1,9 +1,11 @@
 """Listening parties: one queue of songs, and everyone hearing the same second of it.
 
 The movie night's room is the base (sync.Hub and sync.Client): the clock
-everyone agrees on, the hellos, people, pings, buffering waits and every limit
-carry over as they are. What a listening party adds is the queue. The host's
-Mistery holds it, next to the room's state, and says what is in it:
+everyone agrees on, the hellos, people, pings and every limit carry over as
+they are. One thing does not: a film waits for a friend whose stream has run
+dry, and a listening party plays on (ListenHub._stuck). What a listening party
+adds is the queue. The host's Mistery holds it, next to the room's state, and
+says what is in it:
 
     host → guest   queue      rev, start, items [{e, id, title, artist, album,
                               duration, by}], index, total, dj, host, votes, needed
@@ -621,6 +623,24 @@ class ListenHub(sync.Hub):
             self._skip(sorted(self.votes)[0], voted=len(self.votes))
         else:
             self._publish_queue()
+
+    def _stuck(self, t: float, since: float | None = None, already: tuple[str, ...] = ()) -> list:
+        """Nobody: a listening party does not stop for anyone's connection.
+
+        A film waits for a friend whose stream has run dry, because the scene
+        they would miss is the evening. A song is not that. With a guest across
+        the internet the host's music stood still for everybody each time that
+        guest's player opened a song or sought, 4-7 s at a time through a relay
+        40-120 ms away (features7/listen/probe_slow_link.py), which is the worse
+        interruption; and a guest who is behind comes in where the party is as
+        soon as their player has it (listen_session._MusicFollower). A guest's
+        own pause was already theirs alone. So is their buffering.
+        """
+        return []
+
+    def _count_stalls(self, t: float, since: float) -> None:
+        """Nor is anybody found too slow for the party and gone on without, with
+        a notice to everyone: nobody was being waited for."""
 
     def _tick(self, t: float) -> None:
         state = self.state

@@ -540,10 +540,15 @@ in Green"). Shuffle and repeat stay off during a party: the queue is everyone's.
 **Staying together.** The host's Mistery keeps the clock, as for movie night.
 Every player has the party's queue in its own playlist, so one song follows the
 next without a gap, and the room moves on at the same moment, dated to when the
-song ended. A player that has drifted is nudged by 3 % (the pitch is kept) or,
-past 0.75 s, sent to the right place. A player that starts mid-song (joining,
-catching up) is opened a moment ahead and started as the room reaches it.
-Measured with two players on one PC: 0–46 ms apart.
+song ended. A player that has drifted is nudged by 3 % (the pitch is kept). A
+player that comes in mid-song (joining, catching up, after the DJ's seek) is
+put a moment ahead of the room and started as the room reaches it. A guest's
+player gets there from what it has already fetched of the song, so over the
+internet it is a second or two behind a skip, and a few more when joining deep
+into a song. The party never stops for anyone's connection: a guest whose song
+has run dry comes back in where the party is. Measured with two players on one
+PC: 0–46 ms apart. Through a link with a 150 ms round trip: a guest hears the
+party 2.6 s after joining, and 1.7 s after a skip.
 
 **Security.** As for a movie night: one port, TLS with the host's certificate
 pinned in the code, and a 104-bit secret. A guest streams only the songs in the

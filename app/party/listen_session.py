@@ -28,15 +28,18 @@ dates the new song to when the old one ended). For the moment in between, when
 one side has moved on and the other has not yet, the follower waits instead of
 reopening anything. Any other difference between the song playing here and the
 room's (a skip, a jump, a song put on) is a new queue for the player, opened
-paused a little ahead of where the room will be, and started on the room's clock.
+paused ahead of where the room will be, by as long as opening a song takes on
+this link, and started on the room's clock (_MusicFollower says how).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 import queue
 import shutil
+import statistics
 import threading
 import time
 from collections import deque
@@ -60,9 +63,10 @@ perf = time.perf_counter
 # (a friend's songs use -(friend * 1e9 + id), well above this), and "party",
 # which keeps them out of Liked Songs, play counts and the saved session.
 PARTY_SONG_ID = 7_000_000_000_000_000
-# Where a song is opened, ahead of the room, so it can start on the room's clock:
-# the host's own file opens in a few tens of milliseconds, a guest's through the
-# proxy in a few hundred (a token, a TLS connection, the first bytes).
+# The least a song is opened ahead of the room, so it can start on the room's
+# clock: the host's own file opens in a few tens of milliseconds, a guest's
+# through the proxy in a few hundred on one PC (a token, a TLS connection, the
+# first bytes) and in seconds across the internet, which _MusicFollower learns.
 OPEN_AHEAD = {"host": 0.35, "guest": 1.0}
 ACTIVITY_KEEP = 40
 BUSY = ("A movie night is on, so a listening party can't start until it's over: the "
@@ -235,13 +239,89 @@ class _Local:
     loading: bool
 
 
+@dataclass
+class _Place:
+    """Where the paused player was put, to come in from when the room gets there."""
+
+    to: float                       # where it will play from
+    at: float                       # when that was asked (perf)
+    # "open"   a song opened there, ahead of the room (the host's own files)
+    # "start"  a song opened at its first second, to come in by reading on (a guest's)
+    # "near"   a seek to sound mpv already had
+    # "far"    a seek it had to fetch for
+    by: str
+    seen: bool = False              # mpv has said "seeking" since
+    loaded: float | None = None     # an open: when the file was in
+    ready: float | None = None      # when it was there and could have started
+    late: bool = False              # the room got there first
+
+
 class _MusicFollower:
-    """Keeps the music player where the room is, on a thread of its own."""
+    """Keeps the music player where the room is, on a thread of its own.
+
+    Coming in while the room plays (just joined, a new song put on, a guest's
+    own pause over, the DJ's seek) is never "play now and correct after". The
+    player is put, paused, a little ahead of the room, and started the moment
+    the room gets there.
+
+    For the host that is all there is to it: its own file opens, part way in, in
+    a few tens of milliseconds. For a guest the question is how to get ahead of
+    the room at all, because their song comes through the proxy, and every
+    request of mpv's is a new connection to the host: TCP, TLS, the request,
+    three round trips before a byte of sound. Opening a FLAC part way in is
+    many of them. mpv asks for the start of the file, then its last bytes, and
+    then, in a file with no seek table (126 of the 207 in the library this was
+    measured on), hunts for the moment by halving: four to nine more requests,
+    one at a time. On one PC that is 0.14 s. Through a relay holding every byte
+    back 75 ms each way (features7/listen/probe_slow_link.py) it took 2.8 to
+    8.7 s for the same song at the same second.
+
+    The first version allowed one second for it, and when the room got there
+    first it opened the song again from nothing, half as far ahead again, up to
+    four seconds. A friend 75 ms away heard nothing for 14 s after joining; one
+    120 ms away for 35 s, and never again once the DJ had sought, each seek
+    landing behind the room and starting the next. The first real party with a
+    friend elsewhere went that way: in step 21 s after joining, by the host's
+    log, and "can't hear the music or press play". (Pressing play made it
+    worse: with nothing playing it was taken for the guest's own pause.)
+
+    So a guest's player gets there differently:
+
+      a song is opened at its first second
+                      One request, and no hunt. mpv then fetches the file as
+                      fast as the link gives it, many times faster than it
+                      plays.
+      and comes in from what has been fetched
+                      As soon as mpv has the room's moment and a little more, a
+                      seek to just past it asks the host for nothing (a tenth
+                      of a second), and the player starts when the room gets
+                      there. After a skip or a new song the room is seconds in
+                      at most, and that is at once.
+      unless that would take too long
+                      Joining three minutes into a song, or after the DJ's
+                      seek: fetching all of it up to there would take longer
+                      than a seek that fetches (the hunt), going by how fast
+                      mpv is reading. Then it is sent ahead of the room by such
+                      a seek, as far ahead as the last one took, and comes in
+                      from what has been fetched if the room still gets there
+                      first.
+
+    Nothing is opened again for being late. A start is only made with a moment
+    of sound already fetched past it, so it does not run dry in its first
+    second, and never while mpv is still seeking.
+    """
 
     POLL = 0.1
     GAPLESS = 1.5           # a song ending into the next: how long either side may be ahead
     USER_AFTER = 0.8        # a pause this long after our own last one was not ours
-    STUCK = 8.0             # a song still opening after this long is put in again
+    STUCK = 20.0            # a song still opening after this long is put in again
+    MAX_AHEAD = 30.0        # the furthest ahead of the room the player is ever put
+    NEAR = 0.35             # ...and the nearest: for a seek to sound mpv already has
+    RUNWAY = 0.8            # sound fetched past the start before a guest's player starts
+    SETTLE = 0.15           # a seek mpv never called "seeking" is taken as done after this
+    GAUGE = 0.25            # how long mpv's fetching is watched before its speed is believed
+    PATIENCE = 20.0         # reading on is given up for a seek after this long, whatever it promised
+    TRIPS = 12              # round trips to the host a seek that fetches takes, about: the first guess
 
     def __init__(self, room, player, *, role: str, may_control: Callable[[], bool],
                  realign: Callable[[], None], user: Callable[[str], None],
@@ -266,10 +346,16 @@ class _MusicFollower:
         self._asked_at = -1e9
         self._mismatch_since: float | None = None
         self._loading_since: float | None = None
-        # Where the song was opened (opened()): where it plays from when it
-        # starts. See _step for why a paused player's own time-pos is not.
-        self._opened_at: float | None = None
-        self._late = 0                  # opens the room overtook before they were ready
+        # Where the player was put to come in from (opened(), _seek_ahead). Where
+        # it plays from when it starts: see _come_in for why its own time-pos is not.
+        self._place: _Place | None = None
+        self._late = 0                  # times in a row the room got there first
+        self._open_took: deque[float] = deque(maxlen=3)     # the host: how long opening a song took, lately
+        self._seek_took: float | None = None                # a guest: the last seek that had to fetch
+        # A guest waiting for mpv to have fetched the room's moment: since when,
+        # and how far it had got when (perf, the end of what it has), for its speed.
+        self._waiting_since: float | None = None
+        self._fetched: deque[tuple[float, float]] = deque(maxlen=64)
         self.readings: deque[tuple[float, float, int]] = deque(maxlen=4000)
         self.starts: deque[tuple[float, float]] = deque(maxlen=100)    # (aimed at, went), perf
         self.thread = threading.Thread(target=self._run, name="party-music", daemon=True)
@@ -282,13 +368,32 @@ class _MusicFollower:
     def wake(self) -> None:
         self._wake.set()
 
-    def opened(self, position: float) -> None:
+    def open_at(self, state: sync.RoomState, position: float) -> tuple[float, bool]:
+        """Where to open the room's song, the room being at `position`: (the second
+        to open it at, whether that is its first, to come in by reading on)."""
+        if not state.playing:
+            return position, False          # the room is held: on its moment, and no hurry
+        if self.role == "guest":
+            return 0.0, True
+        return position + self._lead("open"), False
+
+    def opened(self, position: float, reading_on: bool = False) -> None:
         """The session put the room's song in the player, paused at `position`."""
-        self._opened_at = float(position)
+        self._place = _Place(float(position), perf(), "start" if reading_on else "open")
+        self._stop_waiting()
         self._set_pause = True
         self._set_at = perf()
         self._asked_for = None
         self._mismatch_since = None
+        self.drift.reset(0.0)
+        self._wake.set()
+
+    def back(self) -> None:
+        """A guest's own pause is over: wherever the player was put before it,
+        it comes in afresh."""
+        self.tuned_out = False
+        self._place = None
+        self._stop_waiting()
         self.drift.reset(0.0)
         self._wake.set()
 
@@ -338,6 +443,69 @@ class _MusicFollower:
             self._buffering = on
             self.room.set_buffering(on)
 
+    def _stop_waiting(self) -> None:
+        self._waiting_since = None
+        self._fetched.clear()
+
+    def _lead(self, kind: str) -> float:
+        """How far ahead of the room to put the player, for it to be there and
+        ready before the room is. Half as far again for every time in a row the
+        room got there first.
+
+        Short rather than safe: late costs a moment (the player comes in from
+        what mpv has fetched by then), and early costs every second of it, in
+        silence.
+        """
+        if kind == "near":
+            base = self.NEAR
+        elif kind == "open":
+            base = OPEN_AHEAD[self.role]
+            if self._open_took:
+                base = max(base, min(self._open_took) * 1.1 + 0.2)
+        elif self._seek_took is not None:
+            base = max(0.5, self._seek_took * 1.1 + 0.2)
+        else:
+            base = OPEN_AHEAD[self.role]
+            rtt = getattr(getattr(self.room, "clock", None), "rtt", None)
+            if rtt:
+                base += self.TRIPS * float(rtt)
+        return min(self.MAX_AHEAD, base * 1.5 ** min(self._late, 4))
+
+    def _short_of(self, mpv, position: float) -> float | None:
+        """How much sound mpv still has to fetch before it has `position`: 0.0 when
+        it has it already, so that a seek there, or playing on from there, asks
+        the host for nothing. Infinite when reading on will never get it there
+        (it is before everything fetched), and None when mpv does not say."""
+        if self.role != "guest":
+            return 0.0                      # the host's own files: nothing is fetched
+        reply = mpv.command_sync("get_property", "demuxer-cache-state", timeout=0.5)
+        data = reply.get("data") if reply.get("error") == "success" else None
+        spans = data.get("seekable-ranges") if isinstance(data, dict) else None
+        if not isinstance(spans, list) or not spans:
+            return None
+        short, reach = math.inf, None
+        for span in spans:
+            first, last = (span.get("start"), span.get("end")) if isinstance(span, dict) else (None, None)
+            if not isinstance(first, (int, float)) or not isinstance(last, (int, float)) or position < first:
+                continue
+            if position <= last:
+                return 0.0
+            if position - last < short:
+                short, reach = position - last, float(last)
+        if reach is not None:
+            self._fetched.append((perf(), reach))
+        return short
+
+    def _reading_on(self, short: float, rate: float) -> float | None:
+        """How long until mpv has a moment it is `short` of, reading on as it is,
+        with that moment moving on at the room's pace. None while it has not
+        been watched for long enough to say; infinite if it is not gaining."""
+        marks = list(self._fetched)         # Qt's thread empties it (opened, back)
+        if len(marks) < 2 or marks[-1][0] - marks[0][0] < self.GAUGE:
+            return None
+        speed = (marks[-1][1] - marks[0][1]) / (marks[-1][0] - marks[0][0])
+        return short / (speed - rate) if speed > rate * 1.2 else math.inf
+
     def _step(self) -> float:
         room = self.room
         state = room.state
@@ -354,7 +522,8 @@ class _MusicFollower:
         self._mismatch_since = None
         if local.loading:
             # Opening. A song that never opens (the host's file gone, a proxy that
-            # cannot reach them) is put in again, every few seconds, not waited on.
+            # cannot reach them) is put in again, but not soon: through a slow link
+            # an open takes seconds, and one begun again takes them again.
             now = perf()
             if self._loading_since is None:
                 self._loading_since = now
@@ -364,6 +533,9 @@ class _MusicFollower:
                 self._realign()
             return 0.05
         self._loading_since = None
+        place = self._place
+        if place is not None and place.by in ("open", "start") and place.loaded is None:
+            place.loaded = perf()
         paused = bool(mpv.cached("pause", False))
         if (self._set_pause is not None and paused != self._set_pause
                 and perf() - self._set_at > self.USER_AFTER and not mpv.cached("idle-active", False)):
@@ -378,49 +550,32 @@ class _MusicFollower:
         data = reply.get("data") if reply.get("error") == "success" else None
         position = float(data) if isinstance(data, (int, float)) and not isinstance(data, bool) else None
         host_now = room.host_time(stamp)
-        busy = bool(mpv.cached("seeking", False)) or bool(mpv.cached("paused-for-cache", False))
+        seeking = bool(mpv.cached("seeking", False))
+        busy = seeking or bool(mpv.cached("paused-for-cache", False))
+        if place is not None and seeking:
+            place.seen = True
         if position is not None:
             self.readings.append((stamp, position, state.seq))
 
         if paused and state.moving_at(host_now):
-            # Starting while the room plays (just joined, a guest catching up, a
-            # player seen paused): never "play now and correct after". The song
-            # is opened a little ahead of the room, and starts the moment the
-            # room gets there.
-            #
-            # From where it was opened, not from its time-pos: mpv's exact seek
-            # plays from exactly there, but while paused a FLAC reports the
-            # stream's seek point before it, 190 ms early here. Planned from
-            # that reading, every catch-up started 150-190 ms ahead of the room
-            # (probe_tune_in.py, three runs of three) and took 5 s of nudging
-            # to come back.
-            self._set_buffering(busy or position is None)
-            if busy or position is None:
-                return 0.05
-            held = self._opened_at
-            if held is not None:
-                ahead = (held - state.position_at(host_now)) / (state.rate or 1.0)
-                if -0.02 <= ahead < 3.0:
-                    self._opened_at = None
-                    self._late = 0
-                    return self._start_at(mpv, stamp + max(0.0, ahead), state.seq)
-                if ahead < 0:
-                    self._late += 1     # the room got there first: open further ahead next time
-            # Anywhere else: open the song again, ahead of the room.
-            self._opened_at = None
-            now = perf()
-            if self._asked_for != want or now - self._asked_at > 2.0:
-                self._asked_for = want
-                self._asked_at = now
-                self._realign()
-            return 0.1
+            return self._come_in(mpv, state, stamp, host_now, position, busy)
         if not paused:
-            self._opened_at = None
+            self._place = None
+            self._stop_waiting()
 
         correction = self.drift.update(state, host_now, position, paused=paused, seeking=busy)
         self._set_buffering(busy or position is None)
         if correction.seek_to is not None:
+            if self.role == "guest" and not paused and state.moving_at(host_now):
+                # Far from the room while it plays: the DJ sought, or this player
+                # ran dry and fell behind. A seek through the proxy takes what the
+                # link makes it take, and lands that far behind the room again
+                # (at 120 ms each way: for ever). So stop, get ahead of the room,
+                # and come in on its clock.
+                self._pause(mpv, True)
+                return self._seek_ahead(mpv, state, host_now, None)
             mpv.command("seek", correction.seek_to, "absolute", "exact")
+            self._place = None              # wherever it was put, it is not there now
         if correction.speed != self._speed:
             self._speed = correction.speed
             mpv.set_speed(correction.speed)
@@ -432,6 +587,103 @@ class _MusicFollower:
             room.report_position(position, local=stamp)
         return self.POLL
 
+    def _come_in(self, mpv, state: sync.RoomState, stamp: float, host_now: float,
+                 position: float | None, busy: bool) -> float:
+        """The room is playing and this player is paused: start it the moment the
+        room reaches where it was put, or put it ahead of the room (again).
+
+        From where it was put, not from its time-pos: mpv's exact seek plays from
+        exactly there, but while paused a FLAC reports the stream's seek point
+        before it, 190 ms early here. Planned from that reading, every catch-up
+        started 150-190 ms ahead of the room (probe_tune_in.py, three runs of
+        three) and took 5 s of nudging to come back.
+        """
+        place = self._place
+        now = perf()
+        if place is not None:
+            since = place.loaded if place.by in ("open", "start") else place.at
+            settled = place.seen or (since is not None and now - since >= self.SETTLE)
+        else:
+            settled = True
+        if busy or position is None or not settled:
+            self._set_buffering(True)
+            return 0.03
+        rate = state.rate or 1.0
+        room_at = state.position_at(host_now)
+        if place is None:
+            # Paused with the room playing, and nobody put it anywhere: a guest
+            # back from their own pause, a start that was missed.
+            return self._seek_ahead(mpv, state, host_now, None)
+        if place.ready is None:
+            place.ready = now
+            if place.by == "open":
+                self._open_took.append(now - place.at)
+            elif place.by == "far" or (place.by == "near" and now - place.at > 0.6):
+                self._seek_took = now - place.at    # "near" that took this long was a fetch after all
+        ahead = (place.to - room_at) / rate
+        if ahead < -0.02:
+            if place.by != "start" and not place.late:
+                place.late = True
+                self._late += 1             # the room got there first
+            return self._seek_ahead(mpv, state, host_now, place.ready)
+        if self._short_of(mpv, self._runway(state, place.to)):
+            # In place, with too little fetched after it: started now, it would
+            # run dry at once. If the room gets here first, that is "late".
+            self._set_buffering(True)
+            return 0.05
+        self._late = 0
+        self._stop_waiting()
+        self._set_buffering(False)
+        if ahead > 0.6:
+            return min(0.25, ahead - 0.5)   # early: wait for the room, however long
+        self._place = None
+        return self._start_at(mpv, stamp + max(0.0, ahead), state.seq)
+
+    def _runway(self, state: sync.RoomState, position: float) -> float:
+        """The moment that has to be fetched for a start at `position` not to run dry."""
+        far = position + self.RUNWAY * (state.rate or 1.0)
+        return min(far, state.duration - 0.05) if state.duration else far
+
+    def _seek_ahead(self, mpv, state: sync.RoomState, host_now: float,
+                    waited_since: float | None) -> float:
+        """Put the paused player ahead of the room by a seek, to come in from there.
+
+        To sound mpv already has, if it has the room's moment and a little more:
+        that seek fetches nothing and is done in a tenth of a second, so it need
+        only be a moment ahead. If mpv will have it sooner than a seek that
+        fetches would take (a song opened at its start, the room a few seconds
+        in; a seek that landed late), it is waited for. Otherwise by a seek that
+        fetches, as far ahead as the last one of those took.
+        """
+        rate = state.rate or 1.0
+        room_at = state.position_at(host_now)
+        duration = state.duration
+        if duration and duration - room_at < self.NEAR + 0.6:
+            self._set_buffering(False)
+            return 0.1                      # the song is all but over: the next one is the place to come in
+        kind, target = "near", room_at + self._lead("near") * rate
+        short = self._short_of(mpv, self._runway(state, target))
+        if short is None and self._late:
+            short = math.inf                # mpv does not say, and "near" was late: it fetches
+        if short:
+            now = perf()
+            if self._waiting_since is None:
+                self._waiting_since = waited_since if waited_since is not None else now
+            far = self._lead("far")
+            soon = self._reading_on(short, rate) if short < math.inf else math.inf
+            if now - self._waiting_since < self.PATIENCE and (
+                    soon is None or soon <= max(1.0, far)):
+                self._set_buffering(True)
+                return 0.05
+            kind, target = "far", room_at + far * rate
+        if duration:
+            target = min(target, max(0.0, duration - 0.25))
+        self._stop_waiting()
+        mpv.command("seek", target, "absolute", "exact")
+        self._place = _Place(target, perf(), kind)
+        self._set_buffering(True)
+        return 0.03
+
     def _start_at(self, mpv, moment: float, seq: int) -> float:
         """Sleep to a scheduled start, then go, if the room has not changed its mind."""
         while not self._stopping.is_set():
@@ -442,6 +694,12 @@ class _MusicFollower:
                 return 0.0
             time.sleep(min(left, 0.02) if left < 0.05 else min(left - 0.03, 0.2))
         if self.room.state.seq == seq and not self._stopping.is_set():
+            if mpv.cached("seeking", False):
+                # Still on its way there (the DJ's seek, through a slow link):
+                # started now it would begin late by however long that takes.
+                # It comes in when it has landed (_come_in).
+                self._place = None
+                return 0.03
             self._pause(mpv, False)
             self.starts.append((moment, perf()))
             self.drift.reset(0.0)           # where it starts is judged as a landing
@@ -455,8 +713,12 @@ class _MusicFollower:
             target = state.position_at(host_now)
             duration = state.duration or 0.0
             finishing = False
-            if local.next_e == want and state.playing and target < self.GAPLESS:
-                finishing = True        # the room moved on first; mpv follows at the end of its song
+            if local.next_e == want and state.playing and target < self.GAPLESS and state.cause == "next":
+                # The room moved on first, at the end of the song; mpv follows at
+                # the end of its own. Not for a song the DJ put on ("media"): mpv
+                # is in the middle of the old one and will not move by itself, and
+                # waiting it out kept the old song playing 1.5 s after every skip.
+                finishing = True
             elif local.prev_e == want and state.moving_at(host_now):
                 if duration and duration - target < self.GAPLESS:
                     finishing = True    # mpv moved on first; the room follows at the end of the song
@@ -992,8 +1254,10 @@ class ListeningSession(QObject):
         self._follower.start()
 
     def _on_realign(self, generation: int) -> None:
-        """Put the room's song in the player, paused a little ahead of where the room
-        will be once it is open; the follower starts it on the room's clock."""
+        """Put the room's song in the player, paused, for the follower to start on
+        the room's clock: the host's own file a little ahead of where the room
+        will be once it is open, a guest's at its first second, to come in from
+        what has been fetched (_MusicFollower.open_at)."""
         if generation != self._generation or self._phase != "on" or self._follower is None:
             return
         room = self._room
@@ -1009,15 +1273,12 @@ class ListeningSession(QObject):
             items = view["items"]
         entries = [self._entry_for(item) for item in items]
         host_now = room.host_time(perf())
-        position = state.position_at(host_now)
-        if state.playing:
-            ahead = OPEN_AHEAD["host" if self._role == "host" else "guest"]
-            position += min(4.0, ahead * (1.5 ** self._follower._late))
+        position, reading_on = self._follower.open_at(state, state.position_at(host_now))
         duration = media.get("duration")
         if isinstance(duration, (int, float)) and duration > 0:
             position = min(position, max(0.0, duration - 0.25))
         self._player._party_load(entries, index, position, self._context())
-        self._follower.opened(position)
+        self._follower.opened(position, reading_on)
         self._want_art(items, index)
 
     def _on_queue(self) -> None:
@@ -1066,7 +1327,16 @@ class ListeningSession(QObject):
 
     def toggle(self) -> None:
         if self._role == "guest" and not self.is_dj:
-            self._tune(in_=self.tuned_out)
+            if self.tuned_out:
+                self._tune(in_=True)
+            elif self._player.is_playing:
+                self._tune(in_=False)
+            else:
+                # The button showed Play: nothing is playing here, and not by
+                # their own pause. Taken as a pause "for them", the press did
+                # the opposite of what it said, and the next one started the
+                # catching up all over again.
+                self._say(self._why_silent())
             return
         state = self.state
         if state is not None:
@@ -1074,9 +1344,20 @@ class ListeningSession(QObject):
 
     def play(self) -> None:
         if self._role == "guest" and not self.is_dj:
-            self._tune(in_=True)
+            if self.tuned_out:
+                self._tune(in_=True)
+            elif not self._player.is_playing:
+                self._say(self._why_silent())
         else:
             self._act("play")
+
+    def _why_silent(self) -> str:
+        """For a guest who pressed Play with nothing playing, their own pause aside:
+        the DJ has paused, or their player is on its way to where the party is."""
+        state = self.state
+        if state is not None and not (state.playing or state.waiting):
+            return f"{self._dj_title()} is the DJ: the music plays again when they press play."
+        return "Catching up with the party: you'll hear it in a moment."
 
     def pause(self) -> None:
         if self._role == "guest" and not self.is_dj:
@@ -1194,9 +1475,7 @@ class ListeningSession(QObject):
         if in_:
             if not follower.tuned_out:
                 return
-            follower.tuned_out = False
-            follower.drift.reset(0.0)
-            follower.wake()
+            follower.back()
             self._say("Back with the party")
         else:
             follower.tuned_out = True
