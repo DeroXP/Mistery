@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QIcon
 from PySide6.QtWidgets import (
     QButtonGroup, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -11,9 +11,9 @@ from PySide6.QtWidgets import (
 from .. import db
 from ..metadata import categories as cat
 from ..models import MediaItem, ShowItem
-from ..util import elide, fmt_duration
+from ..util import fmt_duration
 from .detail_view import _Backdrop
-from .theme import C, display_family
+from .theme import C, display_family, ui_font
 from .widgets.artview import ArtView
 from .widgets.cards import set_extra_actions
 from .widgets.chips import CategoryEditor
@@ -23,6 +23,21 @@ from .widgets.segments import SegmentTray
 
 _TITLE_W = 760                  # the title's room before it steps down a size
 _TITLE_SIZES = (38, 32, 27)     # pt, largest first
+_STORY_W = 760
+_STORY_PT = 12                  # a film's page has its story at this size too
+_STORY_LINES = 3
+
+
+def _story_room() -> int:
+    """The most a series' story may take up: three lines of it, and a little
+    over. The little over is for scripts Windows draws from another font than
+    ours, whose lines are a pixel or two taller (three of Hebrew are 66 px
+    where three of English are 60); it is not enough for a fourth of anything.
+    """
+    metrics = QFontMetrics(ui_font(_STORY_PT))
+    box = metrics.boundingRect(QRect(0, 0, _STORY_W, 10_000), int(Qt.TextFlag.TextWordWrap),
+                               "\n".join("Ag" for _ in range(_STORY_LINES)))
+    return box.height() + 8
 
 
 class ShowView(QWidget):
@@ -99,11 +114,14 @@ class ShowView(QWidget):
 
         self._overview = QLabel()
         self._overview.setWordWrap(True)
-        self._overview.setFixedWidth(760)
+        self._overview.setFixedWidth(_STORY_W)
         # The header is a fixed height, so the summary must not be allowed to
-        # push the buttons out of it — three lines maximum.
-        self._overview.setMaximumHeight(66)
-        self._overview.setStyleSheet("color: #E8E0D4; font-size: 10.5pt;")
+        # push the buttons out of it — three lines maximum (_set_story cuts it
+        # to that). At the size a film's story has on its own page: at 10.5 pt
+        # it was smaller than that, and hard to read from a sofa.
+        self._overview.setFont(ui_font(_STORY_PT))
+        self._story_room = _story_room()
+        self._overview.setStyleSheet(f"color: #E8E0D4; font-size: {_STORY_PT}pt;")
         info.addSpacing(10)
         info.addWidget(self._overview)
 
@@ -201,7 +219,7 @@ class ShowView(QWidget):
         # Genres were plain text on this line; they are now the editor below it.
         self._categories.set_row(show.genres, fresh["user_genres"] if fresh else None)
 
-        self._overview.setText(elide(show.overview or "", 260))
+        self._set_story(show.overview or "")
         self._overview.setVisible(bool(show.overview))
 
         for button in list(self._season_group.buttons()):
@@ -227,6 +245,54 @@ class ShowView(QWidget):
         self._party.setVisible(next_up is not None)
 
         self._render_episodes()
+
+    def _set_story(self, text: str) -> None:
+        """The story, cut to what its three lines hold, by the label's own measure.
+
+        It used to be cut at 260 letters, which is three lines of English at
+        the size it then had. Letters are not all one width: a story in
+        Japanese, or in capitals, ran to five lines and was sliced through the
+        middle by the room it has. So the label is asked how tall each
+        candidate would be, which also counts the taller lines of a script
+        drawn from another font.
+        """
+        label = self._overview
+        label.ensurePolished()              # the style sheet's font, before anything is measured
+        # Let go of the height the last series' story was given: a label never
+        # says it needs less than its minimum, so every story after a long
+        # one would measure as three lines.
+        label.setMinimumHeight(0)
+        label.setMaximumHeight(16_777_215)
+        text = " ".join(text.split())
+        room = self._story_room
+
+        def fits(candidate: str) -> bool:
+            label.setText(candidate)
+            return label.heightForWidth(_STORY_W) <= room
+
+        if text and not fits(text):
+            low, high = 0, len(text)        # the longest beginning that fits with "…" after it
+            while low < high:
+                middle = (low + high + 1) // 2
+                if fits(text[:middle].rstrip() + "…"):
+                    low = middle
+                else:
+                    high = middle - 1
+            cut = text[:low].rstrip()
+            # Back to the end of a word, unless that would give up most of a line.
+            space = cut.rfind(" ")
+            if space > len(cut) - 24:
+                cut = cut[:space].rstrip(" ,;:")
+            text = cut + "…"
+        label.setText(text)
+        # Its height is said outright, not left to the layout. The column this
+        # sits in is aligned to the bottom of the header, and Qt sizes such a
+        # column by asking how tall its labels would be at the column's whole
+        # width, where three lines of story are two. In a wide window that left
+        # the column a line short, and the title, the story and the buttons
+        # were each shaved to make up for it (the story lost its last line's
+        # tails; before this, at 10.5 pt, everything lost a pixel or two).
+        label.setFixedHeight(max(1, label.heightForWidth(_STORY_W)))
 
     def _on_categories_changed(self, names: list) -> None:
         """Written to user_genres, which the metadata pass never touches."""

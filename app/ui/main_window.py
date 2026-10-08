@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self.music = MusicPlayer(self)
         self._in_tray = False
         self._quitting = False
+        self.restart_wanted = False     # main() starts Mistery again after this one (restart_app)
         self._maximized_before_fullscreen = False
         self._last_played: MediaItem | None = None     # this playback's latest title
         # When the song's countdown was last sent to Discord, and from where:
@@ -169,6 +170,7 @@ class MainWindow(QMainWindow):
         # A game controller: the glow, the hints, the player's buttons (couch.py).
         self.couch = CouchNav(self)
         self.settings_page.gamepad_changed.connect(self._on_gamepad_changed)
+        self.settings_page.restart_requested.connect(self.restart_app)
 
         self.stack.setCurrentWidget(self.home)
         # Last time's queue, paused on the song and the second it was left at.
@@ -933,6 +935,16 @@ class MainWindow(QMainWindow):
         self._quitting = True
         self._shutdown()
         QApplication.instance().quit()
+
+    def restart_app(self) -> None:
+        """Quit, and have main() start Mistery again once this one is gone:
+        Settings, Display, for a size that is only read as the app starts.
+        It quits as the tray's Quit does, question about a movie night and all,
+        and an answer of no leaves everything as it was."""
+        self.restart_wanted = True
+        self.quit_app()
+        if not self._quitting:
+            self.restart_wanted = False
 
     def _set_background_mode(self, enabled: bool) -> None:
         """Everything that doesn't need to run when nobody is looking, stopped.

@@ -333,6 +333,14 @@ DEFAULTS: dict = {
     "fetch_lyrics": True,           # synced lyrics from LRCLIB when a track has none
     "close_to_tray": True,          # closing the window while music plays keeps it playing
     "tray_hint_shown": False,
+    # The whole interface, in per cent: text, buttons and pictures together
+    # (Settings, Display). Qt reads it once, as the app starts: see main.py.
+    "ui_scale": 100,
+    # A game controller works the app (ui/couch.py). This switch, and the
+    # "bigger text" one that ui_scale replaces, had no line here at first, and
+    # Settings._apply only takes back what has one: both were forgotten at
+    # every start, and bigger text only ever applied after one.
+    "gamepad": True,
     # the queue, song and position come back paused at the next start
     # (music-session.json in the data folder; see MusicPlayer.restore_session)
     "music_resume": True,
@@ -359,6 +367,13 @@ DEFAULTS: dict = {
     # a narrowed library is still narrowed tomorrow.
     "movie_categories": [],
     "show_categories": [],
+    # .nfo files and pictures that sit beside the videos (what Kodi, Jellyfin
+    # and Plex read and write) are used before anything is looked up online.
+    # They are only ever read. See metadata/local.py.
+    "local_metadata": True,
+    # set to metadata.fit.FIT_VERSION once the pictures already in the art
+    # folder have been brought down to the size they are shown at
+    "art_fit_version": 0,
     "generate_thumbs": True,
     "thumb_count": 120,
     "detect_intros": True,       # learn intro/credits by matching audio across a season
@@ -380,6 +395,10 @@ DEFAULTS: dict = {
     # Library sharing: friends' films, shows and music, played from their PC.
     # Sharing rides on the movie night port, so there is nothing else to forward.
     "sharing_enabled": False,       # switched on by itself when the first friend is added
+    # A friend code that is out and not yet used (share/pairing.py): its secret
+    # and when it was made. Without a line here it did not survive a restart,
+    # so a code sent in the evening was dead once the PC had been off overnight.
+    "sharing_pending": None,
     "sharing_music": True,          # albums and songs go too, not only films and shows
     "sharing_background": True,     # keep serving friends while Mistery itself is closed
     "sharing_keep_awake": True,     # don't let the PC sleep while a friend is watching

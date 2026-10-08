@@ -28,6 +28,7 @@ from typing import Callable
 
 from .. import db
 from ..config import data_dir
+from ..metadata import fit
 
 _log = logging.getLogger("share")
 
@@ -88,7 +89,8 @@ def store(friend_id: int, kind: str, remote_id: int, mark: str | None, blob: byt
     base.mkdir(parents=True, exist_ok=True)
     target = base / (stem + extension)
     part = base / (stem + extension + ".part")
-    part.write_bytes(blob)
+    # A friend on an older Mistery still sends stills as they came, 4K and all.
+    part.write_bytes(fit.fitted(blob))
     os.replace(part, target)
     # The picture this one replaces: the same thing under an older mark.
     prefix = f"{kind}-{remote_id}-"

@@ -137,6 +137,8 @@ Settings page shows what was found.
   Both fonts are free (SIL Open Font License) and bundled in `assets/fonts`,
   their licences beside them
 - A **game controller** works all of it from the couch (below)
+- **Everything bigger**, for a television across the room or for easier
+  reading: Settings → *Display*, in steps up to 200 % (below)
 
 **Finding things in a big library**
 - **Categories** on Movies and Shows: tick as many as you like — Anime, Romance,
@@ -313,7 +315,18 @@ consequences, both of which were live bugs:
 
 **Game controller** — Xbox (XInput) or PlayStation (DualShock 4, DualSense).
 Read only while Mistery's window is in front; Settings → *Game controller*
-switches it off, or makes everything bigger for across the room.
+switches it off.
+
+**Text and button size** — Settings → *Display* makes the whole interface
+bigger, on top of Windows' own scaling: 110, 125, 150, 175 or 200 %. Everything
+grows together, text, buttons and pictures, because the pages are full of fixed
+measures that bigger letters alone would be cut off in. Only the sizes the
+screen has room for are offered: the window is never smaller than 960 × 620 of
+its own units, so a 1920 × 1080 screen at Windows' 125 % has room for 125 %, the
+same screen at Windows' 100 % for 150 %, and a 4K one at Windows' 150 % for all
+of them. Qt reads the size once, as the app starts, so a new one needs a
+restart, and *Restart Mistery* beside the list does it. (Before this there was a "bigger text" box
+under *Game controller*. It never worked: see *Things that used to go wrong*.)
 
 | Xbox | PlayStation | |
 |---|---|---|
@@ -1060,6 +1073,19 @@ user-visible ones:
   downloads ran (which wiped half-typed Settings fields and song selections)
 - *Recently added* sorts by date, not reverse alphabetically; Back returns to the
   right album or artist; the show page keeps the season you were on
+- *Bigger text and buttons* (Settings → Game controller, 1.4.0 to 1.6.2) never
+  did anything. Settings only takes back, at a start, the keys it has a default
+  for; that box's key had none, and bigger text is only applied at a start.
+  *Use a game controller* switched off came back on the same way, and a friend
+  code that was still out stopped working once Mistery had been restarted. All
+  three have their defaults now, and a test fails for any key added without one
+- On a series' page in a wide window, the title, the story and the buttons were
+  each given less height than they need (at 1536 wide: 49 px of the title's 63,
+  49 of the story's 51, 50 of the buttons' 52). Qt sizes a column that is
+  aligned to the bottom by asking how tall its labels would be at the column's
+  whole width, where three lines of story are two; the story's height is now
+  said outright. The story is also cut to three lines by measure and not at 260
+  letters, which is five lines of Japanese
 - Lyrics lookups run on their own thread and give up after a few seconds when
   the lyrics service is down, instead of holding up downloads and quitting
 
@@ -1111,9 +1137,38 @@ rather than the child-process embedding used here.
 
 Source chain, best available wins:
 
-1. **TMDB** — when a free API key is set (Settings → Artwork and metadata).
+1. **The files beside the video** — what Kodi, Jellyfin, Emby and Plex keep
+   there, read by default (Settings → Artwork and metadata → *Use the .nfo
+   files and pictures next to my videos*):
+
+   | | description | poster | wide picture |
+   |---|---|---|---|
+   | a film | `<file name>.nfo`, `movie.nfo` | `<file name>-poster.jpg`, `poster.jpg`, `folder.jpg`, `cover.jpg` | `<file name>-fanart.jpg`, `fanart.jpg`, `backdrop.jpg` |
+   | a series | `tvshow.nfo` | `poster.jpg`, `folder.jpg`, `cover.jpg` | `fanart.jpg`, `backdrop.jpg` |
+   | an episode | `<file name>.nfo` | | `<file name>-thumb.jpg` |
+
+   From a `.nfo` come the title, year, story, tagline, genres and rating, and
+   the TMDB or TVmaze number where it names one. `.png` and `.webp` pictures
+   count as `.jpg` does, Kodi's old `.tbn` is read, and so is a picture named
+   exactly like the video (Plex's way) when it has the shape of what it would
+   be: upright for a poster, wide for a still. A name that speaks for a whole
+   folder (`poster.jpg`, `movie.nfo`, `tvshow.nfo`) only counts where the
+   folder holds that one film or series: in a folder of twelve films,
+   `poster.jpg` is nobody's.
+
+   **These files are only ever read.** Mistery never changes, renames or
+   removes one; it keeps a copy of each picture in its own art folder. What
+   they say always wins over what a lookup says. Where they say everything
+   there is to show (a story and a poster; for an episode, a story and a
+   still) nobody online is asked for any of it; what they leave out is looked
+   up below, by the name in the file's name, since a `.nfo`'s title may be in
+   a language the lookup does not know. (A film with no genre the app has a
+   category for still has its categories looked up, as any film does.) Adding, changing or removing
+   one is noticed at the next scan, and so is switching the setting off, which
+   puts the library back as a lookup would have it.
+2. **TMDB** — when a free API key is set (Settings → Artwork and metadata).
    Posters, backdrops, plots, genres, ratings for everything.
-2. **Keyless online** — no key needed, on by default:
+3. **Keyless online** — no key needed, on by default:
    **TVmaze** for shows and episodes (official episode titles, plot summaries,
    episode stills, show poster, genres, rating) and **Wikipedia** for movies
    (poster and plot from the film's article). Wikipedia is searched rather than
@@ -1121,14 +1176,28 @@ Source chain, best available wins:
    `Night Train - First Light` has to find
    *Night Train: First Light*. Both APIs are throttled to one
    request per host per 0.8 s and back off on HTTP 429.
-3. **The file itself** — several frames are sampled, scored for brightness,
+4. **The file itself** — several frames are sampled, scored for brightness,
    detail and colour, and the best becomes the poster; HDR sources are
    tone-mapped first. Movies always get their backdrop this way, since the
-   online sources only carry posters.
+   online sources only carry posters, and so does an episode nobody had a
+   still for.
 
 Everything is cached on disk, so a second pass costs no network at all.
 
-**Better data is never downgraded.** A row sourced from TMDB, TVmaze or
+**Pictures are kept no bigger than is any use.** A wide picture is 1920 across
+at most and a poster 800 × 1200, whatever it arrived as: TVmaze's stills come
+as large as 3840 × 2160 (one reported from a real library was 1.31 MB) for a
+card 332 × 187, and used to be saved exactly as they came. A 4K still made for
+the test goes from 1.67 MB to 0.32 MB. A poster is never drawn larger than
+that, at any size Mistery offers; a page's backdrop on a 4K screen is drawn at
+up to twice it, as every backdrop from TMDB (1280 across) and every frame
+Mistery cuts itself (1600) always has been. A picture already about the right
+size is kept byte for byte (a 1920-wide still, a 1000 × 1500 poster), since
+encoding a JPEG again costs detail and saves little. The first
+library pass after updating goes through the art folder once, in the
+background, and brings down what is already there.
+
+**Better data is never downgraded.** A row sourced from a `.nfo`, TMDB, TVmaze or
 Wikipedia keeps its title and summary through re-parsing, rescans and file
 changes — only its artwork can be topped up from the file. Art cut from the
 video is recorded as `fallback`, not `done`, so an outage or a rate-limit is
@@ -1146,7 +1215,8 @@ app/
   parser.py              scene-release filenames        probe.py    ffprobe
   scanner.py             folder walk + reconciliation   models.py   view models
   images.py              async image loading            workers.py  background pipeline
-  metadata/  tmdb.py · artwork.py · thumbs.py
+  display.py             interface size
+  metadata/  local.py · tmdb.py · online.py · artwork.py · fit.py · thumbs.py
   player/    mpv_process.py · audio_filters.py
   ui/        theme.py · main_window.py · home_view.py · library_view.py
              detail_view.py · show_view.py · settings_view.py

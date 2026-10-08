@@ -431,6 +431,10 @@ _MIGRATIONS: dict[str, list[str]] = {
         # addresses section below for why we keep them.
         "poster_url TEXT",
         "backdrop_url TEXT",
+        # What tvshow.nfo and the pictures in the series' own folder looked
+        # like when they were last read (metadata/local.py): the scan compares,
+        # and queues the series again when one is added, changed or gone.
+        "local_sig TEXT",
     ],
     "media": [
         # Per-episode values learned by audio fingerprinting; they win over the
@@ -442,6 +446,7 @@ _MIGRATIONS: dict[str, list[str]] = {
         "user_genres TEXT",       # see shows.user_genres
         "poster_url TEXT",        # see shows.poster_url
         "backdrop_url TEXT",
+        "local_sig TEXT",         # see shows.local_sig: the .nfo and pictures beside the file
     ],
     "tracks": [
         # EBU R128 loudness and true peak, measured once per file, so every

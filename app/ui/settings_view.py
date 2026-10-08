@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .. import __version__, db, updates, vr
+from .. import __version__, db, display, updates, vr
 from ..discord_presence import DiscordPresence
 from ..config import find_ffmpeg, find_ffprobe, find_mpv, settings
 from ..metadata.tmdb import TmdbClient
@@ -94,6 +94,16 @@ def _section(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
     return card, layout
 
 
+class _NoWheelCombo(QComboBox):
+    """A list the mouse wheel does not turn. This page is scrolled with the
+    wheel, and a list that passes under the pointer on the way would be changed
+    without a click. For the size of the interface that would only show at the
+    next start, as everything bigger for no reason anyone remembers."""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
+        event.ignore()                  # on to the page, which scrolls
+
+
 class SettingsView(QWidget):
     library_changed = Signal()
     rescan_requested = Signal(bool)
@@ -101,6 +111,7 @@ class SettingsView(QWidget):
     sound_changed = Signal()
     music_cover_changed = Signal()          # the Now Playing cover style
     gamepad_changed = Signal(bool)          # a game controller on or off (ui/couch.py)
+    restart_requested = Signal()            # Display: a new size is read as Mistery starts
     # Answers from work done on a thread of its own (the TMDB key check, the
     # Discord art export), carried back to the UI thread.
     _tmdb_checked = Signal(bool, str)
@@ -150,6 +161,7 @@ class SettingsView(QWidget):
         # Built in the order they always were, then listed for the menu.
         folders = self._build_folders()
         tmdb = self._build_tmdb()
+        display_card = self._build_display()
         playback = self._build_playback()
         music = self._build_music()
         sound = self._build_sound()
@@ -160,7 +172,8 @@ class SettingsView(QWidget):
         controller = self._build_controller()
         about = self._build_about()
         self._sections: list[tuple[str, QWidget]] = [
-            ("Library", folders), ("Artwork", tmdb), ("Playback", playback), ("Music", music),
+            ("Library", folders), ("Artwork", tmdb), ("Display", display_card),
+            ("Playback", playback), ("Music", music),
             ("Sound", sound), ("Thumbnails", thumbnails), ("Discord", discord),
             ("Movie night", self._movie_night), ("VR", vr_card), ("Controller", controller),
             ("System", about),
@@ -332,6 +345,19 @@ class SettingsView(QWidget):
         self._tmdb_status.setWordWrap(True)
         layout.addWidget(self._tmdb_status)
 
+        self._local_files = QCheckBox("Use the .nfo files and pictures next to my videos")
+        self._local_files.setChecked(bool(settings.get("local_metadata", True)))
+        self._local_files.toggled.connect(self._on_local_files)
+        layout.addWidget(self._local_files)
+        local_note = QLabel(
+            "What Kodi, Jellyfin and Plex keep beside a film or a series (movie.nfo, tvshow.nfo, "
+            "poster.jpg, fanart.jpg and their like) is read first, and only what it leaves out "
+            "is looked up online. Mistery only reads these files: it never changes, renames or "
+            "removes one.")
+        local_note.setObjectName("Faint")
+        local_note.setWordWrap(True)
+        layout.addWidget(local_note)
+
         refetch = QPushButton("Re-fetch titles and artwork for the whole library")
         refetch.setToolTip(
             "Looks everything up again through TMDB, TVmaze and Wikipedia. "
@@ -340,6 +366,12 @@ class SettingsView(QWidget):
         refetch.clicked.connect(self._refetch_metadata)
         layout.addWidget(refetch, alignment=Qt.AlignmentFlag.AlignLeft)
         return card
+
+    def _on_local_files(self, on: bool) -> None:
+        """The scan is what notices: with the box off it finds nothing beside
+        any video, and whatever came from there is looked up afresh."""
+        settings.set("local_metadata", bool(on))
+        self.rescan_requested.emit(False)
 
     def _save_tmdb_key(self) -> None:
         key = self._tmdb_key.text().strip()
@@ -378,6 +410,71 @@ class SettingsView(QWidget):
         db.execute("UPDATE media SET meta_state = 'pending'")
         db.execute("UPDATE shows SET meta_state = 'pending'")
         self.rescan_requested.emit(False)
+
+    # --- display ------------------------------------------------------------
+
+    def _build_display(self) -> QWidget:
+        """The size of everything (app/display.py). Only the sizes this screen
+        has room for are in the list, and a new one needs a restart: Qt reads
+        it once, as the app starts."""
+        card, layout = _section(
+            "Text and button size",
+            "Makes everything in Mistery bigger, text, buttons and pictures alike: for a "
+            "television across the room, or simply for easier reading.",
+        )
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        caption = QLabel("Size")
+        caption.setMinimumWidth(150)
+        row.addWidget(caption)
+        self._ui_scale = _NoWheelCombo()
+        self._ui_scale.setMinimumWidth(190)
+        for step in display.fitting():
+            self._ui_scale.addItem("100 % (normal)" if step == 100 else f"{step} %", step)
+        self._ui_scale.currentIndexChanged.connect(self._on_ui_scale)
+        row.addWidget(self._ui_scale)
+        self._restart_app = QPushButton("Restart Mistery")
+        self._restart_app.setObjectName("Primary")
+        # Under half its ~42 px height: past half, Qt draws the corners square.
+        self._restart_app.setStyleSheet("border-radius: 19px;")
+        self._restart_app.clicked.connect(self.restart_requested.emit)
+        row.addWidget(self._restart_app)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self._ui_scale_note = QLabel()
+        self._ui_scale_note.setObjectName("Faint")
+        self._ui_scale_note.setWordWrap(True)
+        layout.addWidget(self._ui_scale_note)
+        self._reload_display()
+        return card
+
+    def _on_ui_scale(self, index: int) -> None:
+        settings.set("ui_scale", int(self._ui_scale.itemData(index)))
+        self._reload_display()
+
+    def _reload_display(self) -> None:
+        steps = [self._ui_scale.itemData(i) for i in range(self._ui_scale.count())]
+        chosen = display.chosen()
+        self._ui_scale.blockSignals(True)
+        # A size chosen on a bigger screen than this one: the largest that fits
+        # is what Mistery is at, and what is shown.
+        self._ui_scale.setCurrentIndex(steps.index(chosen) if chosen in steps else len(steps) - 1)
+        self._ui_scale.blockSignals(False)
+        self._ui_scale.setEnabled(not display.overridden)
+        shown = self._ui_scale.currentData()
+        owed = shown != display.applied and not display.overridden
+        self._restart_app.setVisible(owed)
+        if display.overridden:
+            note = "The size is set outside Mistery (QT_SCALE_FACTOR), so this is not used."
+        elif owed:
+            note = f"Mistery will be at {shown} % once it has been restarted."
+        elif steps[-1] < display.STEPS[-1]:
+            note = f"{steps[-1]} % is the most this screen has room for."
+        else:
+            note = ""
+        self._ui_scale_note.setText(note)
+        self._ui_scale_note.setVisible(bool(note))
 
     # --- playback -----------------------------------------------------------
 
@@ -1165,10 +1262,11 @@ class SettingsView(QWidget):
         self._gamepad_on.setChecked(bool(settings.get("gamepad", True)))
         self._gamepad_on.toggled.connect(self._on_gamepad_toggled)
         layout.addWidget(self._gamepad_on)
-        self._gamepad_bigger = QCheckBox("Bigger text and buttons, for across the room (after a restart)")
-        self._gamepad_bigger.setChecked(bool(settings.get("couch_bigger", False)))
-        self._gamepad_bigger.toggled.connect(lambda on: settings.set("couch_bigger", bool(on)))
-        layout.addWidget(self._gamepad_bigger)
+        # "Bigger text and buttons" was a box here. It is Display's size now,
+        # in steps, for anyone and not only with a controller in hand.
+        bigger = QLabel("For bigger text and buttons from across the room, see Display, above.")
+        bigger.setObjectName("Faint")
+        layout.addWidget(bigger)
         self._gamepad_state = QLabel("No controller connected.")
         self._gamepad_state.setObjectName("Faint")
         layout.addWidget(self._gamepad_state)
@@ -1455,6 +1553,10 @@ class SettingsView(QWidget):
         self._reload_sound()
         self._reload_music()
         self._reload_updates()
+        self._reload_display()
+        self._local_files.blockSignals(True)
+        self._local_files.setChecked(bool(settings.get("local_metadata", True)))
+        self._local_files.blockSignals(False)
 
         failed = db.failed_count()
         self._retry.setEnabled(bool(failed))

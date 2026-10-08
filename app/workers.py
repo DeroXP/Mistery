@@ -17,7 +17,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from . import db, parser, probe, scanner
 from .config import settings
-from .metadata import artwork, online, thumbs
+from .metadata import artwork, fit, local, online, thumbs
 from .metadata.tmdb import TmdbClient, TmdbError
 from .music import library as music_library
 
@@ -126,6 +126,8 @@ class _PipelineTask(QRunnable):
                 self._metadata_stage()
             if not self._stop:
                 self._categories_stage()
+            if not self._stop and settings.get("art_fit_version", 0) != fit.FIT_VERSION:
+                self._art_fit_stage()
             if not self._stop and settings.get("generate_thumbs", True):
                 self._thumbs_stage()
             if not self._stop and settings.get("detect_intros", True):
@@ -175,42 +177,63 @@ class _PipelineTask(QRunnable):
             self._emit(service.library_changed)
 
     def _metadata_stage(self) -> None:
-        """Source chain: TMDB (with a key) → keyless online → frames from the file."""
+        """Source chain: the .nfo and pictures beside the file → TMDB (with a
+        key) → keyless online → frames from the file.
+
+        What is beside the file is read first and wins: it is what the owner
+        of the library chose. Where it leaves nothing to add, nobody is asked
+        at all; otherwise the lookups run as they always did and it is laid
+        over their answer (metadata/local.py).
+        """
         service = self._service
         client = TmdbClient(settings.get("tmdb_api_key", ""), settings.get("tmdb_language", "en-US"))
         tmdb_broken = False
         online_broken = False
+        # One finder for the pass: it remembers each folder's listing, so a
+        # season is one look at its folder.
+        finder = local.Finder()
+        layout = local.Layout(db.query(
+            "SELECT path, folder, kind, show_id FROM media WHERE missing = 0"))
+        self._show_ids: dict[tuple[int, str], int | None] = {}
 
         for show in db.pending_show_metadata(limit=500):
             if self._stop:
                 return
+            beside = finder.for_show(show, layout)
             fields = None
             # "No match" only means something when every source that could have
             # matched was actually asked and answered.
             answered = True
             self._emit(service.status, f"Looking up {show['title']}…")
-            if client.enabled:
+            title, year = self._show_asked_as(show, beside)
+            if not beside.complete and client.enabled:
                 if tmdb_broken:
                     answered = False
                 else:
                     try:
-                        fields = client.show_fields(show["title"], show["year"])
+                        fields = client.show_fields(title, year)
                     except TmdbError as exc:
                         tmdb_broken = True
                         answered = False
                         self._emit(service.status, f"TMDB unavailable: {exc}")
-            if not fields:
+            if not beside.complete and not fields:
                 if online_broken:
                     answered = False
                 else:
                     try:
-                        fields = online.tvmaze_show(show["title"], show["year"])
+                        fields = online.tvmaze_show(title, year)
                     except online.OnlineError as exc:
                         online_broken = True
                         answered = False
                         self._emit(service.status, f"Online lookup unavailable: {exc}")
+            if beside.fields:
+                # Written even when nobody could be reached: what is on this
+                # PC needs no network to be shown.
+                state = "done" if beside.complete else "fallback" if answered else "pending"
+                fields = self._laid_over({"meta_state": state, **(fields or {})}, beside)
             if fields:
                 db.update_show(int(show["id"]), **fields)
+                self._forget_copies(show, fields)
             elif answered:
                 db.update_show(int(show["id"]), meta_state="fallback")
             else:
@@ -230,37 +253,43 @@ class _PipelineTask(QRunnable):
             # stop rather than re-cutting artwork we already have.
             if tmdb_broken and online_broken and row["meta_state"] == "fallback":
                 continue
-            title = row["title"]
             fields: dict | None = None
             self._emit(service.status,
-                       f"Fetching details ({index}/{len(pending)}) — {title}")
+                       f"Fetching details ({index}/{len(pending)}) — {row['title']}")
 
+            beside = finder.for_media(row, layout)
+            title, year = self._asked_as(row, beside)
             show = db.get_show(row["show_id"]) if row["show_id"] else None
-            if client.enabled and not tmdb_broken:
+            if not beside.complete and client.enabled and not tmdb_broken:
                 try:
                     if row["kind"] == "movie":
-                        fields = client.movie_fields(title, row["year"])
-                    elif show and show["tmdb_id"]:
-                        fields = client.episode_fields(
-                            int(show["tmdb_id"]), row["season"] or 1, row["episode"] or 1
-                        )
+                        fields = client.movie_fields(title, year)
+                    elif show:
+                        tmdb_id = show["tmdb_id"] or self._show_id(show, row, client)
+                        if tmdb_id:
+                            fields = client.episode_fields(
+                                int(tmdb_id), row["season"] or 1, row["episode"] or 1
+                            )
                 except TmdbError as exc:
                     tmdb_broken = True
                     self._emit(service.status, f"TMDB unavailable: {exc}")
 
-            if not fields and not online_broken:
+            if not beside.complete and not fields and not online_broken:
                 try:
                     if row["kind"] == "movie":
-                        fields = online.wikipedia_movie(title, row["year"])
-                    elif show and show["tvmaze_id"]:
-                        fields = online.tvmaze_episode_fields(
-                            int(show["tvmaze_id"]), row["season"] or 1, row["episode"] or 1
-                        )
+                        fields = online.wikipedia_movie(title, year)
+                    elif show:
+                        tvmaze_id = show["tvmaze_id"] or self._show_id(show, row)
+                        if tvmaze_id:
+                            fields = online.tvmaze_episode_fields(
+                                int(tvmaze_id), row["season"] or 1, row["episode"] or 1
+                            )
                 except online.OnlineError as exc:
                     online_broken = True
                     self._emit(service.status, f"Online lookup unavailable: {exc}")
 
-            if not fields and row["meta_source"] in _ONLINE_SOURCES:
+            unreachable = (client.enabled and tmdb_broken) or online_broken
+            if not fields and not beside.fields and row["meta_source"] in _ONLINE_SOURCES:
                 # This row was matched online before and is being looked up
                 # again (a refetch from Settings). Finding nothing now, or not
                 # reaching anyone, must not undo that: cut art used to replace
@@ -274,16 +303,35 @@ class _PipelineTask(QRunnable):
                     if generated.get("meta_state") == "pending":
                         continue            # cut short by quitting; still queued
                     fields = {key: generated[key] for key in lacking if generated.get(key)}
-                if not ((client.enabled and tmdb_broken) or online_broken):
+                if not unreachable:
                     fields["meta_state"] = "done"
                 if fields:
                     db.update_media(int(row["id"]), **fields)
                     self._emit(service.media_updated, int(row["id"]))
                 continue
 
+            if beside.fields:
+                # What is beside the file wins over anyone's answer. With no
+                # answer it is all there is: settled if it is everything,
+                # asked about again on a later pass if it is not.
+                if not fields:
+                    state = "done" if beside.complete else "pending" if unreachable else "fallback"
+                    fields = {"meta_state": state, "meta_source": "local"}
+                fields = self._laid_over(fields, beside)
+                if beside.described:
+                    fields["meta_source"] = "nfo"
+
             # Fill whatever is still missing from the file itself — and always
-            # give movies a real backdrop, which the online sources lack.
-            if not fields or (row["kind"] == "movie" and not fields.get("backdrop")):
+            # give movies a real backdrop, which the online sources lack. An
+            # episode gets a frame of its own when it has no picture and nobody
+            # is going to give it one: it was matched, or described beside its
+            # file, with no still, and its card would stay a blank. Not while
+            # its still is only waiting for a host that is down ('pending'):
+            # that comes on a later pass, and a frame meanwhile is ffmpeg's
+            # time for every episode of a season.
+            if not fields or (not fields.get("backdrop") and (
+                    row["kind"] == "movie"
+                    or (not row["backdrop"] and fields.get("meta_state") != "pending"))):
                 generated = self._generate_art(row)
                 if fields:
                     # Online data won — keep its state, borrow only the art.
@@ -295,10 +343,96 @@ class _PipelineTask(QRunnable):
                     fields = generated
 
             db.update_media(int(row["id"]), **fields)
+            self._forget_copies(row, fields)
             self._emit(service.media_updated, int(row["id"]))
 
         if pending:
             self._emit(service.library_changed)
+
+    @staticmethod
+    def _laid_over(fields: dict, beside: "local.Info") -> dict:
+        """An answer with what is beside the file laid over it.
+
+        A picture from beside the file has no web address, whatever the one it
+        takes the place of had: left in, Discord would be shown TVmaze's poster
+        for a series that shows the owner's own here (db.ART_URL_COLUMNS).
+        """
+        merged = {**fields, **beside.fields}
+        for column, url_column in db.ART_URL_COLUMNS.items():
+            if column in beside.fields:
+                merged[url_column] = None
+        return merged
+
+    @staticmethod
+    def _asked_as(row, beside: "local.Info") -> tuple[str, int | None]:
+        """The name and year to look a film or an episode up by.
+
+        The row's own, as ever, unless a .nfo has named it. That title is the
+        owner's, perhaps in the owner's language, and the one in the file's
+        name is the likelier for Wikipedia or TMDB to know. The .nfo's year is
+        kept, being surer than a file name's.
+        """
+        title, year = row["title"], row["year"]
+        if "title" not in beside.fields and row["meta_source"] != "nfo":
+            return title, year
+        try:
+            parsed = parser.parse(row["path"])
+        except Exception:
+            return title, year
+        return parsed.title or title, beside.fields.get("year") or year or parsed.year
+
+    @staticmethod
+    def _show_asked_as(show, beside: "local.Info") -> tuple[str, int | None]:
+        """The same for a series, which has no file of its own: by the name in
+        its first episode's file name, once a tvshow.nfo has given it another."""
+        title, year = show["title"], show["year"]
+        if not show["local_sig"]:
+            return title, year
+        first = db.query_one(
+            "SELECT path FROM media WHERE show_id = ? AND missing = 0 "
+            "ORDER BY season, episode LIMIT 1", (int(show["id"]),))
+        try:
+            parsed = parser.parse(first["path"]) if first else None
+        except Exception:
+            parsed = None
+        if parsed is None or not parsed.title:
+            return title, year
+        return parsed.title, beside.fields.get("year") or parsed.year or year
+
+    def _show_id(self, show, row, client: TmdbClient | None = None) -> int | None:
+        """Which series this is to TMDB (given the client) or to TVmaze, when
+        nobody was ever asked: a series whose own .nfo and poster left nothing
+        to look up, with an episode that does. Asked once, by the name in the
+        episode's file name, and kept for the rest of its episodes.
+        """
+        if not show["local_sig"]:
+            return None             # it was looked up, and nobody knew it
+        column = "tmdb_id" if client is not None else "tvmaze_id"
+        key = (int(show["id"]), column)
+        if key not in self._show_ids:
+            try:
+                parsed = parser.parse(row["path"])
+            except Exception:           # a file name the parser cannot read: nothing to ask by
+                self._show_ids[key] = None
+                return None
+            title, year = parsed.title or show["title"], parsed.year or show["year"]
+            if client is not None:
+                match, _confident = client.find_show(title, year)
+                found = int(match["id"]) if match else None
+            else:
+                found = online.tvmaze_show_id(title, year)
+            self._show_ids[key] = found
+            if found:
+                db.update_show(int(show["id"]), **{column: found})
+        return self._show_ids[key]
+
+    @staticmethod
+    def _forget_copies(row, fields: dict) -> None:
+        """A picture from beside the video that the row has just been given
+        another in place of: its copy in the art folder goes."""
+        for column in ("poster", "backdrop"):
+            if fields.get(column):
+                local.forget_copy(row[column], fields[column])
 
     def _categories_stage(self) -> None:
         """Categories for any film that still has none, whoever was asked.
@@ -324,7 +458,7 @@ class _PipelineTask(QRunnable):
         """
         service = self._service
         rows = db.query(
-            "SELECT id, title, year FROM media "
+            "SELECT id, path, title, year, meta_source FROM media "
             "WHERE kind = 'movie' AND missing = 0 AND (genres IS NULL OR genres = '') "
             "ORDER BY sort_title"
         )
@@ -337,7 +471,9 @@ class _PipelineTask(QRunnable):
             self._emit(service.status,
                        f"Looking for categories ({index}/{len(rows)}) — {row['title']}")
             try:
-                genres = online.movie_categories(row["title"], row["year"])
+                # By the name the metadata stage asked by: the one in the file's
+                # name, where a .nfo has given the film the owner's own.
+                genres = online.movie_categories(*self._asked_as(row, local.Info()))
             except online.OnlineError as exc:
                 # One unreachable host means the rest of the list is unreachable
                 # too; the rows stay empty and the next pass asks again.
@@ -364,6 +500,21 @@ class _PipelineTask(QRunnable):
         return self._until_paused(lambda cancel: artwork.generate(
             row["path"], row["duration"] or 0, row["hdr"], cancel=cancel,
         ))
+
+    def _art_fit_stage(self) -> None:
+        """Once per library: the pictures already in the art folder, brought
+        down to the size they are shown at. New ones arrive that size
+        (metadata/fit.py says why and how big)."""
+        service = self._service
+
+        def note(index: int, total: int) -> None:
+            self._emit(service.status, f"Making artwork smaller ({index}/{total})…")
+
+        _shrunk, _saved, complete = fit.fit_cache(cancel=lambda: self._stop, progress=note)
+        # Cut short, or a picture was open somewhere: the next pass goes
+        # through them again, and the ones already done cost a look each.
+        if complete:
+            settings.set("art_fit_version", fit.FIT_VERSION)
 
     def _tv_stage(self) -> None:
         """Learn intro and credits positions by matching audio across a season."""

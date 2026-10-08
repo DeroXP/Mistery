@@ -12,6 +12,7 @@ from typing import Callable, Iterable
 
 from . import db, parser
 from .config import VIDEO_EXTS
+from .metadata import local
 
 # Directories that never hold a feature we care about.
 _SKIP_DIRS = {
@@ -22,6 +23,9 @@ _SKIP_DIRS = {
 
 # Anything smaller than this is almost certainly a clip, not a feature or episode.
 _MIN_SIZE = 20 * 1024 * 1024
+
+# Where a title came from that a file name must not replace.
+_TITLED_BY = ("tmdb", "tvmaze", "wikipedia", "nfo")
 
 
 @dataclass
@@ -54,9 +58,15 @@ class ScanResult:
 
 
 def iter_video_files(
-    folders: Iterable[Path], on_error: Callable[[str], None] | None = None
+    folders: Iterable[Path], on_error: Callable[[str], None] | None = None,
+    on_folder: Callable[[str, list[str]], None] | None = None,
 ) -> Iterable[Path]:
-    """Yield every video file under the given roots, skipping extras folders."""
+    """Yield every video file under the given roots, skipping extras folders.
+
+    `on_folder` is told each folder's files as the walk lists them, before any
+    of its videos is yielded: the listing is already paid for, and the .nfo
+    files and pictures beside the videos are found from it (metadata/local.py).
+    """
     seen: set[str] = set()
 
     def _walk_error(exc: OSError) -> None:
@@ -75,6 +85,8 @@ def iter_video_files(
         ):
             dirnames[:] = [d for d in dirnames if d.lower() not in _SKIP_DIRS
                            and not d.startswith(".")]
+            if on_folder is not None:
+                on_folder(dirpath, filenames)
             for name in filenames:
                 if Path(name).suffix.lower() not in VIDEO_EXTS:
                     continue
@@ -132,9 +144,10 @@ def _renamed_fields(row: sqlite3.Row, path: Path) -> dict:
     """The naming columns for an existing row, read again from `path`."""
     fields = _naming_fields(path, parser.parse(path))
 
-    # An official title from an online source beats anything we can read
-    # off a filename, so re-parsing must not undo it.
-    online = row["meta_source"] in ("tmdb", "tvmaze", "wikipedia")
+    # An official title from an online source, or the one in the .nfo beside
+    # the file, beats anything we can read off a filename, so re-parsing must
+    # not undo it.
+    online = row["meta_source"] in _TITLED_BY
     changed_kind = fields.get("kind") != row["kind"]
     if online and not changed_kind:
         fields.pop("title", None)
@@ -266,8 +279,9 @@ def scan(
     present: list[str] = []
     claimed: set[int] = set()
     unmatched: list[tuple[Path, os.stat_result]] = []
+    finder = local.Finder()
 
-    for path in iter_video_files(roots, on_error=result.errors.append):
+    for path in iter_video_files(roots, on_error=result.errors.append, on_folder=finder.listed):
         try:
             stat = path.stat()
         except OSError as exc:
@@ -314,7 +328,7 @@ def scan(
             # of the episode puts them elsewhere, and detection only writes
             # what it is sure of, so stale ones would skip real story.
             record.update(intro_start=None, intro_end=None, credits_at=None)
-        if cached["meta_source"] in ("tmdb", "tvmaze", "wikipedia"):
+        if cached["meta_source"] in _TITLED_BY:
             record.pop("title", None)
             record.pop("sort_title", None)
             record.pop("year", None)
@@ -364,4 +378,83 @@ def scan(
                 progress_callback(record["title"])
 
     result.removed = db.mark_missing(present)
+    _note_beside(finder)
     return result
+
+
+def _note_beside(finder: local.Finder) -> int:
+    """Queue again whatever has had a .nfo or a picture beside it added,
+    replaced or taken away since it was last read (metadata/local.py).
+
+    Only names, sizes and times are compared here, and nothing is opened: a
+    library with no such files costs this no disk at all, since the names come
+    from the walk that has just been made. A folder that walk did not reach (a
+    drive that is unplugged) says nothing, so its rows are left as they are.
+
+    With the setting off every row is taken to have nothing beside it, which
+    is also what puts a library back the way it was when someone turns it off.
+    """
+    rows = db.query(
+        "SELECT id, path, folder, kind, show_id, local_sig, meta_source, poster, backdrop "
+        "FROM media WHERE missing = 0")
+    layout = local.Layout(rows)
+    use = local.enabled()
+    changed = 0
+    for row in rows:
+        if not finder.walked(row["folder"]):
+            continue
+        found = finder.beside(row, layout) if use else local.NOTHING
+        signature = finder.signature(found)
+        if signature == row["local_sig"]:
+            continue
+        fields: dict = {"local_sig": signature, "meta_state": "pending"}
+        if row["meta_source"] == "nfo" and found.nfo is None:
+            # Its .nfo is gone, and the title it gave goes with it.
+            fields["meta_source"] = None
+            try:
+                named = _naming_fields(Path(row["path"]), parser.parse(row["path"]))
+            except Exception:           # a file name the parser cannot read keeps the title it has
+                named = None
+            if named is not None:
+                fields.update(title=named["title"], sort_title=named["sort_title"])
+                if row["kind"] == "movie":
+                    fields["year"] = named["year"]
+        _drop_copies(row, found, fields)
+        db.update_media(int(row["id"]), **fields)
+        changed += 1
+
+    for show in db.query("SELECT id, local_sig, poster, backdrop FROM shows"):
+        if not any(finder.walked(folder) for folder in layout.episode_folders(show["id"])):
+            continue
+        found = finder.show(layout.show_folders(show["id"])) if use else local.NOTHING
+        signature = finder.signature(found)
+        if signature == show["local_sig"]:
+            continue
+        fields = {"local_sig": signature, "meta_state": "pending"}
+        if found.nfo is None and local.had_nfo(show["local_sig"]):
+            # Its tvshow.nfo is gone, and the name it gave goes with it: back
+            # to the one in its files' names, which is also the only one it
+            # can be looked up by.
+            first = db.query_one(
+                "SELECT path FROM media WHERE show_id = ? AND missing = 0 "
+                "ORDER BY season, episode LIMIT 1", (int(show["id"]),))
+            try:
+                named = parser.parse(first["path"]) if first else None
+            except Exception:
+                named = None
+            if named is not None and named.title:
+                fields.update(title=named.title, sort_title=named.sort_title)
+        _drop_copies(show, found, fields)
+        db.update_show(int(show["id"]), **fields)
+        changed += 1
+    return changed
+
+
+def _drop_copies(row: sqlite3.Row, found: local.Beside, fields: dict) -> None:
+    """A picture that was beside the video and no longer is: the row lets go of
+    the copy the art folder held of it, and the copy is removed. The art
+    folder's file, never anything in the library."""
+    for column, path in (("poster", found.poster), ("backdrop", found.backdrop)):
+        if path is None and local.is_copy(row[column]):
+            fields[column] = None
+            local.forget_copy(row[column])

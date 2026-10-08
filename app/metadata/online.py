@@ -17,7 +17,7 @@ import requests
 
 from .. import __version__, db
 from ..config import art_dir
-from . import categories
+from . import categories, fit
 
 _TIMEOUT = 12.0
 _CACHE_TTL = 60 * 60 * 24 * 30
@@ -186,9 +186,8 @@ def _download_image(url: str | None, name: str) -> str | None:
         raise _ImageUnavailable(f"HTTP {response.status_code} from {host}")
     if response.status_code != 200 or not response.content:
         return None
-    try:
-        destination.write_bytes(response.content)
-    except OSError:
+    # At the size it is shown at: an "original" still can be 3840 x 2160 (fit.py).
+    if not fit.write_fitted(response.content, destination):
         return None
     return str(destination)
 
@@ -218,8 +217,8 @@ def _normalise(text: str) -> str:
 
 # --- TVmaze: shows and episodes ---------------------------------------------
 
-def tvmaze_show(title: str, year: int | None) -> dict | None:
-    """Show-level fields, or None when there's no plausible match."""
+def _tvmaze_match(title: str, year: int | None) -> dict | None:
+    """TVmaze's own entry for a show, or None when there's no plausible match."""
     data = _get_json("https://api.tvmaze.com/singlesearch/shows", {"q": title})
     if not isinstance(data, dict):
         return None
@@ -239,7 +238,22 @@ def tvmaze_show(title: str, year: int | None) -> dict | None:
     premiered = (data.get("premiered") or "")[:4]
     if year and premiered.isdigit() and abs(int(premiered) - year) > 1:
         return None
+    return data
 
+
+def tvmaze_show_id(title: str, year: int | None) -> int | None:
+    """Which show it is and nothing else: no poster is fetched. For a series
+    with everything beside its files except what one of its episodes needs."""
+    data = _tvmaze_match(title, year)
+    return int(data["id"]) if data else None
+
+
+def tvmaze_show(title: str, year: int | None) -> dict | None:
+    """Show-level fields, or None when there's no plausible match."""
+    data = _tvmaze_match(title, year)
+    if data is None:
+        return None
+    premiered = (data.get("premiered") or "")[:4]
     show_id = int(data["id"])
     image = (data.get("image") or {}).get("original")
     poster, poster_url, state = _art(image, f"tvmaze-{show_id}-poster")

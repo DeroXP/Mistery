@@ -23,8 +23,8 @@ from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app import db
-from app.config import assets_dir, find_mpv, icon_path, settings
+from app import db, display
+from app.config import assets_dir, find_mpv, icon_path
 from app.ui.main_window import MainWindow
 from app.ui.theme import C
 
@@ -200,6 +200,55 @@ def _release_instance() -> None:
         kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
         kernel32.CloseHandle(_instance_mutex)
         _instance_mutex = None
+
+
+# Mistery starting itself again (Settings, Display: a new size is read as it
+# starts): the new one is given the old one's process id after this.
+AFTER = "--after"
+
+
+def _wait_for_the_last(argv: list[str]) -> None:
+    """Started by a Mistery that is on its way out: wait until it is gone.
+
+    Until its process ends it still holds the name only one Mistery may have,
+    and may still answer on the pipe. A new one that arrived early would take
+    it for a Mistery already open, ask it to show itself and leave, and there
+    would be none. Twenty seconds at most: it has a library pass to stop and a
+    player to close, and after that it is not coming back.
+    """
+    if AFTER not in argv or sys.platform != "win32":
+        return
+    try:
+        pid = int(argv[argv.index(AFTER) + 1])
+    except (IndexError, ValueError):
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32)
+    kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenProcess(0x00100000, False, pid)       # SYNCHRONIZE
+    if not handle:
+        return                  # gone already
+    try:
+        kernel32.WaitForSingleObject(handle, 20_000)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _start_again() -> None:
+    """Start a fresh Mistery as this one ends. It waits for this one to be gone
+    (_wait_for_the_last), so this is the last thing done before leaving."""
+    import subprocess
+
+    # As in _repair_and_restart: frozen, sys.executable is the whole command.
+    command = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        command.append(str(Path(__file__).resolve()))
+    try:
+        subprocess.Popen([*command, AFTER, str(os.getpid())], close_fds=True)
+    except OSError:
+        logging.getLogger("startup").exception("could not start Mistery again")
 
 
 LINK_SCHEME = "mistery://"
@@ -510,13 +559,14 @@ def main() -> int:
         "frozen=%s | assets %s | mpv %s",
         bool(getattr(sys, "frozen", False)), assets_dir(), find_mpv() or "not found")
 
+    _wait_for_the_last(sys.argv)
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
-    # Settings, Game controller: bigger text and buttons for across the room.
-    # Qt scales everything by this, and only reads it before the app exists.
-    if settings.get("couch_bigger") and "QT_SCALE_FACTOR" not in os.environ:
-        os.environ["QT_SCALE_FACTOR"] = "1.25"
+    # Settings, Display: the size of the whole interface, for a television
+    # across the room. Qt scales everything by it, and only reads it before
+    # the app exists (app/display.py).
+    display.start()
     app = QApplication(sys.argv)
     app.setApplicationName("Mistery")
     app.setOrganizationName("Mistery")
@@ -619,7 +669,10 @@ def main() -> int:
             "The library will still scan, but playback will not start.",
         )
 
-    return app.exec()
+    code = app.exec()
+    if getattr(window, "restart_wanted", False):
+        _start_again()
+    return code
 
 
 if __name__ == "__main__":
