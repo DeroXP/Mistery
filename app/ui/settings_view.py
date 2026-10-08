@@ -96,12 +96,24 @@ def _section(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
 
 class _NoWheelCombo(QComboBox):
     """A list the mouse wheel does not turn. This page is scrolled with the
-    wheel, and a list that passes under the pointer on the way would be changed
-    without a click. For the size of the interface that would only show at the
-    next start, as everything bigger for no reason anyone remembers."""
+    wheel, and a list that passes under the pointer on the way took the wheel
+    for itself and was changed without a click: the video quality, the
+    hardware decoder, the VR player. For the size of the interface that would
+    only show at the next start, as everything bigger for no reason anyone
+    remembers. Every list on this page is one of these; a click, or the arrow
+    keys once it has been clicked, choose as before."""
 
     def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
         event.ignore()                  # on to the page, which scrolls
+
+
+class _NoWheelSpin(QSpinBox):
+    """The same for a number box. The movie night port is one: a notch of the
+    wheel over it saved another port and unticked "I've forwarded port ...",
+    and the next movie night was one friends could not reach."""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
+        event.ignore()
 
 
 class SettingsView(QWidget):
@@ -523,7 +535,7 @@ class SettingsView(QWidget):
         quality_row = QHBoxLayout()
         quality_row.setSpacing(10)
         quality_row.addWidget(QLabel("Video quality"))
-        self._quality = QComboBox()
+        self._quality = _NoWheelCombo()
         self._quality.addItem("Data saver — cheapest scaling, lowest GPU load", "fast")
         self._quality.addItem("Standard — good scaling (recommended)", "balanced")
         self._quality.addItem("Best — best scaling, heaviest GPU load", "high")
@@ -539,7 +551,7 @@ class SettingsView(QWidget):
         hw_row = QHBoxLayout()
         hw_row.setSpacing(10)
         hw_row.addWidget(QLabel("Hardware decoding"))
-        self._hwdec = QComboBox()
+        self._hwdec = _NoWheelCombo()
         self._hwdec.addItems(["auto-safe", "auto", "d3d11va", "dxva2", "vulkan", "no"])
         self._hwdec.setCurrentText(settings.get("hwdec", "auto-safe"))
         self._hwdec.currentTextChanged.connect(self._on_hwdec_changed)
@@ -547,7 +559,7 @@ class SettingsView(QWidget):
 
         hw_row.addSpacing(20)
         hw_row.addWidget(QLabel("Skip step"))
-        self._seek_step = QSpinBox()
+        self._seek_step = _NoWheelSpin()
         self._seek_step.setRange(5, 60)
         self._seek_step.setSuffix(" s")
         self._seek_step.setValue(int(settings.get("seek_step", 10)))
@@ -592,7 +604,7 @@ class SettingsView(QWidget):
         saver_after_caption = QLabel("After")
         saver_after_caption.setMinimumWidth(150)
         saver_row.addWidget(saver_after_caption)
-        self._screensaver_after = QSpinBox()
+        self._screensaver_after = _NoWheelSpin()
         self._screensaver_after.setRange(10, 3600)
         self._screensaver_after.setSingleStep(30)
         self._screensaver_after.setSuffix(" s of stillness")
@@ -654,7 +666,7 @@ class SettingsView(QWidget):
         cover_caption = QLabel("Now Playing cover")
         cover_caption.setMinimumWidth(150)
         cover_row.addWidget(cover_caption)
-        self._cover_style = QComboBox()
+        self._cover_style = _NoWheelCombo()
         self._cover_style.addItem("Spinning record", "disc")
         self._cover_style.addItem("Album cover", "cover")
         self._cover_style.setMinimumWidth(190)
@@ -711,7 +723,7 @@ class SettingsView(QWidget):
             caption = QLabel(label)
             caption.setMinimumWidth(150)
             line.addWidget(caption)
-            box = QComboBox()
+            box = _NoWheelCombo()
             for value, text in options:
                 box.addItem(text, value)
             current = str(settings.get(key, options[0][0]))
@@ -822,7 +834,7 @@ class SettingsView(QWidget):
         row = QHBoxLayout()
         row.setSpacing(10)
         row.addWidget(QLabel("Frames per file"))
-        self._thumb_count = QSpinBox()
+        self._thumb_count = _NoWheelSpin()
         self._thumb_count.setRange(20, 400)
         self._thumb_count.setSingleStep(10)
         self._thumb_count.setValue(int(settings.get("thumb_count", 120)))
@@ -1095,7 +1107,7 @@ class SettingsView(QWidget):
         port_caption = QLabel("Port")
         port_caption.setMinimumWidth(150)
         port_row.addWidget(port_caption)
-        self._party_port = QSpinBox()
+        self._party_port = _NoWheelSpin()
         # Below 1024 are the ports Windows services and routers keep for
         # themselves; none of them is a sensible place for this.
         self._party_port.setRange(1024, 65535)
@@ -1125,7 +1137,7 @@ class SettingsView(QWidget):
         quality_caption = QLabel("Friends start with")
         quality_caption.setMinimumWidth(150)
         quality_row.addWidget(quality_caption)
-        self._party_quality = QComboBox()
+        self._party_quality = _NoWheelCombo()
         # "auto" sends the file as it is: on the PC this was written on the
         # upload measured 909 Mbit/s and the heaviest film needs 11.7 Mbit/s a
         # friend (transcode.per_friend_mbps). A smaller picture is each
@@ -1305,7 +1317,7 @@ class SettingsView(QWidget):
         row = QHBoxLayout()
         row.setSpacing(10)
         row.addWidget(QLabel("Use"))
-        self._vr_target = QComboBox()
+        self._vr_target = _NoWheelCombo()
         self._vr_target.currentIndexChanged.connect(self._on_vr_target_changed)
         row.addWidget(self._vr_target, 1)
 

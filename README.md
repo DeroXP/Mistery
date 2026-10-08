@@ -1086,6 +1086,11 @@ user-visible ones:
   whole width, where three lines of story are two; the story's height is now
   said outright. The story is also cut to three lines by measure and not at 260
   letters, which is five lines of Japanese
+- Scrolling Settings with the mouse wheel changed whatever list or number box
+  passed under the pointer: the video quality, the hardware decoder, and the
+  movie night port, where one notch saved another port and unticked "I've
+  forwarded port …". No list or number on that page is turned by the wheel
+  now; the page scrolls instead
 - Yellow and grey buttons that take their shape from the theme were drawn with
   square corners: *Save and test* in Settings, *New playlist*, an album's
   *Shuffle*. Their 22 px corner radius was more than half their 42 px height,
