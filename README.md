@@ -1086,6 +1086,11 @@ user-visible ones:
   whole width, where three lines of story are two; the story's height is now
   said outright. The story is also cut to three lines by measure and not at 260
   letters, which is five lines of Japanese
+- Yellow and grey buttons that take their shape from the theme were drawn with
+  square corners: *Save and test* in Settings, *New playlist*, an album's
+  *Shuffle*. Their 22 px corner radius was more than half their 42 px height,
+  and Qt drops a radius that is (a button with an icon is 44 high and got away
+  with it). It is 20 px now
 - Lyrics lookups run on their own thread and give up after a few seconds when
   the lyrics service is down, instead of holding up downloads and quitting
 

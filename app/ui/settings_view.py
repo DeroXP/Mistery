@@ -435,8 +435,6 @@ class SettingsView(QWidget):
         row.addWidget(self._ui_scale)
         self._restart_app = QPushButton("Restart Mistery")
         self._restart_app.setObjectName("Primary")
-        # Under half its ~42 px height: past half, Qt draws the corners square.
-        self._restart_app.setStyleSheet("border-radius: 19px;")
         self._restart_app.clicked.connect(self.restart_requested.emit)
         row.addWidget(self._restart_app)
         row.addStretch(1)

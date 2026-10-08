@@ -186,7 +186,10 @@ QPushButton#Primary {{
     border: none;
     font-weight: 700;
     padding: 12px 28px;
-    border-radius: 22px;
+    /* Under half its height: past half, Qt draws the corners square. Left to
+       this rule a button is 42 px high, 44 with an icon; at 22 px only the
+       ones with an icon were round. */
+    border-radius: 20px;
     font-size: 11.5pt;
 }}
 QPushButton#Primary:hover {{ background: {C.PLAY_BG_HOVER}; }}
@@ -198,7 +201,7 @@ QPushButton#Ghost {{
     border: none;
     color: {C.TEXT};
     padding: 12px 24px;
-    border-radius: 22px;
+    border-radius: 20px;        /* as for Primary: under half its 42 px */
     font-size: 11pt;
     font-weight: 600;
 }}
