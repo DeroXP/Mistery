@@ -467,6 +467,7 @@ _MIGRATIONS: dict[str, list[str]] = {
     ],
     "friend_media": [
         "backdrop_mark TEXT",                        # a friend's film's wide picture
+        "liked INTEGER",                             # a friend's song they liked (their Liked Songs)
     ],
 }
 
@@ -1396,7 +1397,7 @@ def save_friend_media(friend_id: int, items: list[dict]) -> int:
     """
     columns = ("kind", "remote_id", "parent_id", "title", "sort_title", "year", "season",
                "episode", "duration", "artist", "genres", "overview", "art", "art_mark",
-               "backdrop_mark")
+               "backdrop_mark", "liked")
     now = time.time()
     rows = []
     for item in items:

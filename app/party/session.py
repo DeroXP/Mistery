@@ -179,6 +179,7 @@ class _Job:
     lan: str | None
     generation: int
     result: dict = field(default_factory=dict)
+    line_up: list[int] | None = None     # a playlist's media ids, for Next together
 
 
 # --- following the room -------------------------------------------------------------------
@@ -613,7 +614,12 @@ class PartySession(QObject):
             parent = owner
         super().__init__(parent)
         self._player = player
-        self._open_item = opener if callable(opener) else (lambda item, start_at=None: player.play(item, start_at))
+        def open_in_player(item, start_at=None, line_up=None):
+            if line_up and hasattr(player, "set_line_up"):
+                player.set_line_up(*line_up)
+            return player.play(item, start_at)
+
+        self._open_item = opener if callable(opener) else open_in_player
         self.me: Person | None = None       # None: people.me() when a movie night starts
 
         self._relay = _Relay(self)
@@ -815,7 +821,7 @@ class PartySession(QObject):
     # --- starting ---------------------------------------------------------------------------
 
     def start_host(self, item: MediaItem, quality: str = "auto", party_id: str | None = None,
-                   start_at: float | None = None) -> bool:
+                   start_at: float | None = None, line_up: list[int] | None = None) -> bool:
         """Start a movie night of item. Returns at once: False (with `error`) when it
         cannot even begin; `changed` once the invite is ready, `error` then `ended`
         if it fails on the way.
@@ -825,6 +831,11 @@ class PartySession(QObject):
         is on screen in this player starts where it is, paused; anything else
         starts at the beginning, paused, for the host to press play once the
         friends are in.
+
+        line_up is a playlist's media ids, item among them: the player follows
+        it, so the host's Next together at the end of each film is the list's
+        next one rather than nothing. Without it a playlist night stopped after
+        its first film, because opening the film forgot the list it came from.
         """
         if self._role is not None:
             self.error.emit("A movie night is already on. End it before you start another.")
@@ -867,7 +878,8 @@ class PartySession(QObject):
                                        port or None, forwarded=bool(settings.get("party_forwarded", False)))
         self._status = "Getting the movie night ready…"
         job = _Job(item=item, quality=str(quality or "auto"), port=port, party_id=party_id,
-                   position=position, me=me, lan=self.lan_address, generation=self._generation)
+                   position=position, me=me, lan=self.lan_address, generation=self._generation,
+                   line_up=[int(i) for i in line_up] if line_up and item.id in line_up else None)
         self.changed.emit()
         self.message.emit(self._status)
         self._in_background(lambda: self._host_setup(job), lambda result, error: self._host_ready(job, error))
@@ -908,6 +920,7 @@ class PartySession(QObject):
             identity = tls.new_identity([lan] if lan else [])
             server, pin = server_mod.PartyServer(identity, token, job.port, bind=self.bind), identity.pin
         made["server"] = server
+        job.item = _measured(job.item)
         try:
             default = server.set_media(job.item.path, job.item.duration or None, job.quality)
         except OSError as exc:
@@ -1051,12 +1064,18 @@ class PartySession(QObject):
         self._attach()
         if self._attached and self._player_shows(job.item):
             # Already on screen: the room takes over the film where it is.
+            if job.line_up:
+                self._player.set_line_up(job.line_up, job.line_up.index(job.item.id))
             self._start_follower(self._host_source(job.item, {}), open_now=False)
         else:
             # MainWindow.play opens the player page (and pauses the music); it opens
             # the film a moment later, and a film that cannot be opened comes back
             # through player_failed().
-            self._open_item(job.item, job.position)
+            if job.line_up:
+                self._open_item(job.item, job.position,
+                                line_up=(job.line_up, job.line_up.index(job.item.id)))
+            else:
+                self._open_item(job.item, job.position)
             if self._role is None:
                 return
         self._notice("Movie night on. Press play when your friends are in.")
@@ -1356,11 +1375,12 @@ class PartySession(QObject):
         server, generation = self._server, self._generation
         wanted = str(settings.get("party_quality", "auto") or "auto")
 
-        def share() -> tuple[str, bool]:
+        def share() -> tuple[str, bool, MediaItem]:
             from . import transcode
 
-            default = server.set_media(item.path, item.duration or None, wanted)
-            return default, transcode.pick_encoder() is not None
+            measured = _measured(item)
+            default = server.set_media(measured.path, measured.duration or None, wanted)
+            return default, transcode.pick_encoder() is not None, measured
 
         def shared(result, error) -> None:
             if generation != self._generation or self._room is None:
@@ -1368,10 +1388,10 @@ class PartySession(QObject):
             if error is not None:
                 self._notice(f"{Path(item.path).name} can't be shared: {error}")
                 return
-            default, transcodes = result
-            media = _media_for(item, me, default, transcodes)
+            default, transcodes, measured = result
+            media = _media_for(measured, me, default, transcodes)
             self._quality_default = default
-            self._next_items[media["key"]] = item
+            self._next_items[media["key"]] = measured
             self._room.set_media(media, 0.0, playing=True)
         self._in_background(share, shared)
         return True
@@ -1841,6 +1861,28 @@ def _whose(host: str | None) -> str:
 # The room's description of its film lives in media.py, which the Mistery with
 # no window can import too (app/share/nights.py); the old name stays for callers.
 from .media import media_for as _media_for  # noqa: E402,F401
+
+
+def _measured(item: MediaItem) -> MediaItem:
+    """item with its length, read from the file when the library has none yet.
+
+    A film added a moment ago has no length until the library's background
+    pass reads it, and a room with no length never ends: at the last frame the
+    room kept running, the host was never offered Next together, and a
+    playlist's night stopped there. Run on the worker thread (ffprobe, about
+    0.1 s); the library's own row is left for its pass to fill in."""
+    if item.duration and item.duration > 0:
+        return item
+    from ..probe import probe
+
+    try:
+        found = probe(item.path, timeout=20.0)
+    except Exception:                       # noqa: BLE001 - a length is a nicety here
+        _log.exception("movie night: could not read the length of %s", Path(item.path).name)
+        return item
+    if not found.ok or not found.duration or found.duration <= 0:
+        return item
+    return replace(item, duration=float(found.duration))
 
 
 

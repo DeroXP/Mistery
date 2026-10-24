@@ -101,6 +101,10 @@ class PlayerView(QWidget):
     # the host asks for the movie night panel (invite code, people).
     party_requested = Signal()
     party_panel_requested = Signal()
+    # The next (or previous) entry of a playlist is a friend's film
+    # (friend_library_view.FriendItem): the window asks their PC for it, and the
+    # line-up stays where it is, already moved on to that entry.
+    friend_line_requested = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -290,16 +294,51 @@ class PlayerView(QWidget):
         self._line_up = [int(i) for i in media_ids]
         self._line_index = index if 0 <= index < len(self._line_up) else 0
 
+    @property
+    def line_up(self) -> list[int]:
+        """The playlist being followed, as media ids; empty for none."""
+        return list(self._line_up)
+
+    @property
+    def line_index(self) -> int:
+        return self._line_index
+
+    @property
+    def is_active(self) -> bool:
+        """Something is playing, or paused, in the player."""
+        return bool(self._active)
+
     def _line_step(self, step: int) -> tuple[int, object] | None:
         """The playlist entry `step` places along, skipping ones whose file has
-        gone since. (index, media row), or None at the end of the list."""
+        gone since. (index, media row), or None at the end of the list.
+
+        A friend's film in the list (a negative number, friend_library_view.ref_id)
+        comes back as a FriendItem instead of a row, and is skipped while their
+        PC does not answer or they are no longer a friend.
+        """
         index = self._line_index + step
         while 0 <= index < len(self._line_up):
-            row = db.get_media(self._line_up[index])
-            if row is not None and not row["missing"]:
-                return index, row
+            number = self._line_up[index]
+            if number < 0:
+                from .friend_library_view import video_by_ref
+
+                friend = video_by_ref(number)
+                if friend is not None and not friend.away:
+                    return index, friend
+            else:
+                row = db.get_media(number)
+                if row is not None and not row["missing"]:
+                    return index, row
             index += step
         return None
+
+    @staticmethod
+    def _entry(row):
+        """What a line-up entry is called and looks like: your own film from its
+        row, or a friend's (FriendItem) as it is."""
+        if getattr(row, "friend_id", None) is not None:
+            return row
+        return MediaItem.from_row(db.get_media(int(row["id"])))
 
     def _next_row(self, item: MediaItem):
         """What follows this film or episode. Peeks only — the Up Next card is
@@ -459,7 +498,7 @@ class PlayerView(QWidget):
         return True
 
     def play_friend(self, item: MediaItem, stream, start_at: float = 0.0,
-                    subtitle: str = "") -> bool:
+                    subtitle: str = "", keep_line_up: bool = False) -> bool:
         """Play a friend's film or episode, streamed from their PC.
 
         `stream` holds it open (app/share/playback.py, already opened: mpv reads
@@ -498,7 +537,10 @@ class PlayerView(QWidget):
         self.overlay.set_tracks([], [])
         self.overlay.set_thumbnails(None)
         self.overlay.set_boost(bool(settings.get("dialogue_boost")))
-        self._line_up, self._line_index = [], 0
+        if not keep_line_up:
+            # Played from a playlist, the window has set the list already
+            # (MainWindow._on_friend_opened), and Up Next follows it from here.
+            self._line_up, self._line_index = [], 0
         self._refresh_nav()
         self.overlay.set_autoplay(bool(settings.get("autoplay_next", True)))
         self.overlay.set_quality(quality_preset(settings.get("video_quality", "balanced")), "")
@@ -522,6 +564,11 @@ class PlayerView(QWidget):
         self.overlay.show()
         self.overlay.wake()
         return True
+
+    @property
+    def friend_stream(self):
+        """The friend's stream on screen (app/share/playback.Stream), or None."""
+        return self._friend
 
     def _close_friend(self) -> None:
         """Let a friend's stream go: off Qt's thread, since it says goodbye to
@@ -573,6 +620,18 @@ class PlayerView(QWidget):
             self.overlay.wake()
             return
         self._save_friend_progress(watched=True)
+        row = self._next_row(self._item) if self._line_up else None
+        if row is not None and not self._next_card_declined:
+            # A playlist goes on after a friend's film as after one of yours.
+            if self.overlay.next_card.isVisible():
+                self.overlay.next_card.hold(False)
+                return
+            self._next_card_shown = True
+            nxt = self._entry(row)
+            countdown = 5 if settings.get("autoplay_next", True) else None
+            self.overlay.present_next_card(nxt.display_title, countdown, nxt.wide_art or nxt.art or "")
+            self.overlay.wake()
+            return
         self.stop_and_close()
 
     def _launch_settings(self) -> tuple:
@@ -818,7 +877,7 @@ class PlayerView(QWidget):
         if row is None:
             return
         self._next_card_shown = True
-        nxt = MediaItem.from_row(db.get_media(int(row["id"])))
+        nxt = self._entry(row)
         countdown = 8 if settings.get("autoplay_next", True) else None
         self.overlay.present_next_card(
             nxt.display_title, countdown, nxt.wide_art or nxt.art or ""
@@ -858,9 +917,16 @@ class PlayerView(QWidget):
         self.save_progress()
         position, self._position = self._position, 0.0     # saved: no second save
         if row is None:
-            db.set_watched(finished.id, True)     # only reachable from the card
-            self.progress_changed.emit()
+            self._mark_finished(finished)     # only reachable from the card
             self.stop_and_close()
+            return
+        if getattr(row, "friend_id", None) is not None:
+            # A friend's film is next in the list: their PC is asked for it, and
+            # this one stays on screen until it comes (or says why not).
+            self._line_index = step[0]
+            if mark_watched:
+                self._mark_finished(finished)
+            self.friend_line_requested.emit(row)
             return
         # Hand the Up Next still over before the card disappears, so the next
         # episode grows out of it instead of cutting through black.
@@ -887,10 +953,18 @@ class PlayerView(QWidget):
                 self._on_end_file("eof")
             return
         if mark_watched:
-            db.set_watched(finished.id, True)
-            self.progress_changed.emit()
+            self._mark_finished(finished)
         if not pixmap.isNull():
             self.transition_requested.emit(pixmap, rect)
+
+    def _mark_finished(self, finished: MediaItem) -> None:
+        """The film or episode that just ran to its end, marked watched: yours
+        in your library, a friend's in where you got to in theirs."""
+        if finished.id:
+            db.set_watched(finished.id, True)
+        elif self._friend is not None:
+            self._save_friend_progress(watched=True)
+        self.progress_changed.emit()
 
     def _go_to_previous(self) -> None:
         if not self._active or self._item is None:
@@ -902,6 +976,10 @@ class PlayerView(QWidget):
         row = step[1] if step else (None if self._line_up else
                                     db.previous_episode(self._item.id))
         if row is None:
+            return
+        if getattr(row, "friend_id", None) is not None:
+            self._line_index = step[0]
+            self.friend_line_requested.emit(row)
             return
         was_at = self._line_index
         if step is not None:
@@ -948,7 +1026,7 @@ class PlayerView(QWidget):
             # over the held last frame — counting down only if autoplay is on,
             # otherwise waiting for a click.
             self._next_card_shown = True
-            nxt = MediaItem.from_row(db.get_media(int(row["id"])))
+            nxt = self._entry(row)
             countdown = 5 if settings.get("autoplay_next", True) else None
             self.overlay.present_next_card(
                 nxt.display_title, countdown, nxt.wide_art or nxt.art or ""

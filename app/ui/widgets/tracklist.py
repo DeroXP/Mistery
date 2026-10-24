@@ -172,7 +172,12 @@ class _TrackDelegate(QStyledItemDelegate):
             painter.setPen(bright)
             title = index.data() or ""
             if not ready:
-                note = "  ·  Downloading" if row.get("state") == "incomplete" else "  ·  Unavailable"
+                if row.get("state") == "incomplete":
+                    note = "  ·  Downloading"
+                elif row.get("state") == "away":         # a friend's song, their PC not answering
+                    note = f"  ·  {row.get('whose') or 'Their'}'s PC is off"
+                else:
+                    note = "  ·  Unavailable"
                 width = int(text_rect.width()) - painter.fontMetrics().horizontalAdvance(note)
                 elided = painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, max(20, width))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -189,7 +194,7 @@ class _TrackDelegate(QStyledItemDelegate):
             glyph.moveCenter(QRectF(rect).center())
             if row.get("liked"):
                 paint_icon(painter, "heart_filled", glyph, QColor(view.accent if ready else C.TEXT_FAINT))
-            elif hovered and ready:
+            elif hovered and ready and not row.get("friend"):     # Liked Songs is yours alone
                 over = view.hover_like
                 paint_icon(painter, "heart", glyph, QColor(C.TEXT if over else C.TEXT_DIM))
         else:
@@ -357,7 +362,8 @@ class TrackList(QTableView):
         if self.model_.columns[index.column()] != "like":
             return False
         row = self.model_.rows[index.row()]
-        if row.get("id") is not None and ((row.get("state") or "ready") == "ready" or row.get("liked")):
+        if row.get("id") is not None and not row.get("friend") and (
+                (row.get("state") or "ready") == "ready" or row.get("liked")):
             self.like_requested.emit(row, not row.get("liked"))
         return True
 
@@ -426,18 +432,25 @@ def track_menu(parent, track: dict, player, extra: list | None = None,
     add = menu.addAction("Add to queue", lambda: player.add_to_queue(track))
     play_next.setEnabled(ready)
     add.setEnabled(ready)
-    liked = bool(track.get("liked"))
-    like = menu.addAction("Remove from Liked Songs" if liked else "Save to Liked Songs",
-                          lambda: player.set_liked(track, not liked))
-    like.setEnabled(ready or liked)
+    friends = bool(track.get("friend"))
+    if not friends:
+        # Liked Songs is yours: a friend's song can't be in it (player.set_liked).
+        liked = bool(track.get("liked"))
+        like = menu.addAction("Remove from Liked Songs" if liked else "Save to Liked Songs",
+                              lambda: player.set_liked(track, not liked))
+        like.setEnabled(ready or liked)
     if track.get("id") is not None:
+        # A friend's song goes in under its own number (friend_library_view.ref_id),
+        # beside yours; it can go into a playlist while their PC is off, too.
         # Parented to this menu so it goes when it does (see WA_DeleteOnClose
         # above); a submenu parented to the page outlived every right-click.
         playlists = add_to_playlist_menu(menu, "music", [int(track["id"])], on_playlist_change)
-        playlists.setEnabled(ready)
+        playlists.setEnabled(ready or friends)
         menu.addMenu(playlists)
     for label, callback in extra or []:
         menu.addAction(label, callback)
-    menu.addSeparator()
-    menu.addAction("Show in folder", lambda: reveal_in_explorer(track["path"]))
+    if not friends:
+        # Their song's file is on their PC: there is no folder of yours to show.
+        menu.addSeparator()
+        menu.addAction("Show in folder", lambda: reveal_in_explorer(track["path"]))
     return menu

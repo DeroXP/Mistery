@@ -162,6 +162,36 @@ class Channel:
         blob = self._read_bytes(size, 60.0)
         return blob, str(answer.get("content_type") or "image/jpeg")
 
+    def thumbs(self, kind: str, remote_id: int) -> tuple[dict, bytes] | None:
+        """A film's seek-bar pictures: (their layout, the picture sheet), or
+        None when there are none. A friend on a Mistery from before this
+        request refuses it, which is the same None."""
+        try:
+            answer = self.ask({"type": "thumbs", "kind": kind, "id": int(remote_id)},
+                              expect="thumbs", timeout=60.0)
+        except ShareError:
+            if self.sock is None:
+                raise
+            return None
+        size = answer.get("bytes")
+        layout = answer.get("layout")
+        if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_ART:
+            return None
+        blob = self._read_bytes(size, 60.0)
+        return (layout, blob) if isinstance(layout, dict) else None
+
+    def lyrics(self, remote_id: int) -> dict | None:
+        """A song's words as their PC has them: {"synced", "plain", "source"},
+        or None when their Mistery does not know this request."""
+        try:
+            answer = self.ask({"type": "lyrics", "id": int(remote_id)}, expect="lyrics", timeout=30.0)
+        except ShareError:
+            if self.sock is None:
+                raise
+            return None
+        return {name: answer.get(name) if isinstance(answer.get(name), str) else ""
+                for name in ("synced", "plain", "source")}
+
     def play(self, kind: str, remote_id: int, quality: str | None = None) -> dict:
         """Ask to play something: a token for the HTTP routes, and its length.
 

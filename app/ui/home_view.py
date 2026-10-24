@@ -420,7 +420,9 @@ class HomeView(QWidget):
             self.play_requested.emit(item)
 
     def _on_action(self, action: str, item) -> None:
-        if isinstance(item, FriendItem):
+        if isinstance(item, FriendItem) and action == "playlist":
+            self.item_action.emit(action, item)         # the window's playlist menu takes either
+        elif isinstance(item, FriendItem):
             {"play": self.friend_play_requested,
              "together": self.friend_together_requested}.get(action, self.friend_open_requested).emit(item)
         else:

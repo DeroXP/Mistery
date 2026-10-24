@@ -302,6 +302,8 @@ class AlbumView(_MusicPage):
 
 class ArtistView(_MusicPage):
     album_requested = Signal(int)
+    friend_play_requested = Signal(object)      # a friend's album of this artist's (FriendItem)
+    friend_open_requested = Signal(object)
 
     def __init__(self, player, parent=None) -> None:
         super().__init__(player, parent)
@@ -387,17 +389,25 @@ class ArtistView(_MusicPage):
     def reload(self) -> None:
         if not self._name:
             return
+        from .friend_library_view import FriendAlbumCard, album_song_rows, friends_albums_not_mine
+
         albums = [dict(a) for a in library.artist_albums(self._name)]
-        if not albums:
+        # Friends' albums by this artist that you do not have yourself: on this
+        # page as on the Music page, saying whose (friend_library_view).
+        wanted = library.artist_key(self._name)
+        theirs = [album for album in friends_albums_not_mine()
+                  if library.artist_key(album.artist or "Unknown Artist") == wanted]
+        if not albums and not theirs:
             self.back_requested.emit()
             return
-        first = next((a for a in albums if a.get("cover")), albums[0])
+        first = next((a for a in albums if a.get("cover")), albums[0] if albums else {})
         colours = library.parse_palette(first.get("palette"))
         self._page.set_colours(colours)
         self._tracks.set_accent(colours["accent"])
         self._eyebrow.setStyleSheet(
             f"color: {colours['accent']}; font-size: 9pt; font-weight: 800; letter-spacing: 1.5px;")
-        self._avatar.set_art(first.get("cover"), self._name)
+        cover = first.get("cover") or next((album.art for album in theirs if album.art), None)
+        self._avatar.set_art(cover, self._name)
         self._title.setText(self._name)
 
         self._albums.clear()
@@ -409,14 +419,24 @@ class ArtistView(_MusicPage):
             # nowhere on this page: only the Music page listened to it.
             card.action_requested.connect(self._on_card_action)
             self._albums.addWidget(card)
+        for album in theirs:
+            card = FriendAlbumCard(album)
+            card.clicked.connect(self.friend_open_requested.emit)
+            card.play_requested.connect(self.friend_play_requested.emit)
+            card.action_requested.connect(
+                lambda action, item: (self.friend_play_requested if action == "play"
+                                      else self.friend_open_requested).emit(item))
+            self._albums.addWidget(card)
 
         rows: list[dict] = []
         for album in albums:
             rows.extend(dict(t) for t in library.album_tracks(int(album["id"])))
+        rows.extend(album_song_rows(theirs))
         self._songs_rows = rows
         self._tracks.set_tracks(rows)
         ready = sum(1 for r in rows if r["state"] == "ready")
-        self._meta.setText(f"{len(albums)} album{'s' if len(albums) != 1 else ''}  ·  "
+        count = len(albums) + len(theirs)
+        self._meta.setText(f"{count} album{'s' if count != 1 else ''}  ·  "
                            f"{ready} song{'s' if ready != 1 else ''}")
         self._play.setEnabled(ready > 0)
         self._shuffle.setEnabled(ready > 1)

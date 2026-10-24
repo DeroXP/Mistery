@@ -958,6 +958,12 @@ class FriendsView(QWidget):
         from ..share import art
 
         art.forget(friend_id)               # our copies of their pictures go too
+        from ..share import playback
+
+        playback.forget_thumbs(friend_id)   # and of their films' seek-bar pictures
+        from ..share import reach
+
+        reach.forget(friend_id)
         self._checked_at.pop(friend_id, None)
         self._reload_friends()
         self._say_sharing()

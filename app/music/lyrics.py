@@ -167,6 +167,8 @@ def _store(track_id: int, synced: str, plain: str, source: str) -> Lyrics:
 
 def find(track: dict, allow_online: bool = True) -> Lyrics:
     """Lyrics for a track row, from the best source that has them. Never raises."""
+    if track.get("friend"):
+        return _from_friend(track)
     track_id = int(track["id"])
     hit = cached(track_id)
     if hit is not None:
@@ -196,6 +198,45 @@ def find(track: dict, allow_online: bool = True) -> Lyrics:
     if not allow_online:
         return Lyrics([], "", "none")
     return _lrclib(track)
+
+
+_FRIENDS_WORDS: dict[tuple[int, int], Lyrics] = {}
+
+
+def _from_friend(track: dict) -> Lyrics:
+    """A friend's song: the words their PC has for it, asked of their PC.
+
+    Their Mistery already found them the way this one would (a .lrc beside the
+    song, its tags, or a lookup of its own), so nothing is looked up online
+    from here. Kept for this session only: the lyrics table is keyed on this
+    library's songs, and a friend's song is not one of them. A friend on an
+    older Mistery, or a PC that is off, gives "unavailable", which is not kept.
+    """
+    key = (int(track["friend"]), int(track.get("remote_id") or 0))
+    if key in _FRIENDS_WORDS:
+        return _FRIENDS_WORDS[key]
+    friend = db.friend(key[0])
+    if friend is None or key[1] <= 0:
+        return Lyrics([], "", "none")
+    from ..share import client
+
+    try:
+        with client.Channel(friend) as channel:
+            answer = channel.lyrics(key[1])
+    except (client.ShareError, OSError) as problem:
+        _log.info("no lyrics from friend %d: %s", key[0], problem)
+        return Lyrics([], "", "unavailable")
+    if answer is None:
+        return Lyrics([], "", "unavailable")
+    synced, plain = answer["synced"], answer["plain"]
+    if answer["source"] == "instrumental":
+        found = Lyrics([], "", "instrumental")
+    elif looks_like_lyrics(f"{synced}\n{plain}"):
+        found = Lyrics(parse_lrc(synced), plain, "friend")
+    else:
+        found = Lyrics([], "", "none")
+    _FRIENDS_WORDS[key] = found
+    return found
 
 
 class _Unavailable(Exception):

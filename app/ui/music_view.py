@@ -47,6 +47,80 @@ def search_context(text: str) -> dict:
     return {"kind": "search", "title": f"Search: {text}", "id": text}
 
 
+def _friends_albums() -> list:
+    """Friends' albums for the Albums tab, once each, saying whose (and dimmed
+    when their PC is not answering): friend_library_view.library_items."""
+    from .friend_library_view import library_items
+
+    return library_items("album")
+
+
+def _with_friends_songs(rows: list[dict], text: str = "") -> list[dict]:
+    """Songs: yours, and the songs of friends' albums you do not have, in one
+    list ordered as yours are (artist, year, album, disc, track). Each of theirs
+    says whose in its album column and is greyed while their PC is off."""
+    from .friend_library_view import album_song_rows, friends_albums_not_mine
+
+    theirs = album_song_rows(friends_albums_not_mine())
+    if text:
+        theirs = [row for row in theirs if any(text in (row.get(key) or "").lower()
+                                               for key in ("title", "artist", "album"))]
+    if not theirs:
+        return rows
+
+    def key(row: dict) -> tuple:
+        artist = row.get("album_artist_name") or row.get("album_artist") or row.get("artist") or ""
+        album = row.get("album") if row.get("friend") else (row.get("album_title") or row.get("album"))
+        return (library.sort_key(artist), row.get("year") or 0, library.sort_key(album or ""),
+                row.get("disc_no") or 0, row.get("track_no") or 0)
+
+    return sorted(rows + theirs, key=key)
+
+
+def _with_friends_artists(rows: list[dict]) -> list[dict]:
+    """Artists: yours, with friends' albums you do not have counted in, and
+    an artist you only have through a friend added (their album's cover)."""
+    from .friend_library_view import friends_albums_not_mine
+
+    out = {library.artist_key(row["name"]): dict(row) for row in rows}
+    for album in friends_albums_not_mine():
+        name = album.artist or "Unknown Artist"
+        entry = out.get(library.artist_key(name))
+        if entry is None:
+            entry = out[library.artist_key(name)] = {
+                "name": name, "sort_name": library.sort_key(name), "album_count": 0,
+                "track_count": 0, "cover": None, "spellings": [name], "friends_only": True}
+        entry["album_count"] = int(entry.get("album_count") or 0) + 1
+        if not entry.get("cover") and album.art:
+            entry["cover"] = album.art
+    return sorted(out.values(), key=lambda row: (row["sort_name"], row["name"]))
+
+
+def _in_order(tiles: list, theirs: list, order: str) -> list:
+    """Your album tiles, in the order the library gave them, with friends'
+    albums put among them by the same order: artist, title, or newest first.
+    For "played" a friend's album has no plays of yours, so it goes last."""
+    if not theirs:
+        return tiles
+    if order == "played":
+        return tiles + theirs
+
+    def key(tile) -> tuple:
+        if getattr(tile, "friend_id", None) is not None:
+            artist, title, year, added = tile.artist or "", tile.title, tile.year, tile.added_at
+        else:
+            row = tile.extra
+            artist, title, year, added = (row.get("artist") or "", row.get("title") or "",
+                                          row.get("year"), row.get("added_at") or 0)
+        if order == "title":
+            return (library.sort_key(title),)
+        if order == "recent":
+            return (-(added or 0),)
+        return (library.sort_key(artist), year or 0, library.sort_key(title))
+
+    return sorted(tiles + theirs, key=key)
+
+
 def _scroll(inner: QWidget) -> QScrollArea:
     area = QScrollArea()
     area.setWidgetResizable(True)
@@ -59,6 +133,10 @@ def _scroll(inner: QWidget) -> QScrollArea:
 class MusicView(QWidget):
     album_opened = Signal(int)
     artist_opened = Signal(str)
+    # A friend's album among yours (friend_library_view.library_items): played
+    # through their PC, and opened in their library, as on Home.
+    friend_play_requested = Signal(object)
+    friend_open_requested = Signal(object)
     # A line for the top bar — "Added to Road trip." Adding a song to a playlist
     # from Songs or Liked changes nothing you can see on this page, so without
     # this the click looked like it had missed.
@@ -234,6 +312,20 @@ class MusicView(QWidget):
         layout.setContentsMargins(0, 6, 0, 0)
         layout.setSpacing(0)
 
+        # Whose Liked Songs: yours, or a friend's (their PC says which of its
+        # songs it has liked: catalog "liked"). Shown only once a friend has any.
+        self._liked_friend: int | None = None
+        self._liked_whose = QWidget()
+        self._liked_whose_row = QHBoxLayout(self._liked_whose)
+        self._liked_whose_row.setContentsMargins(0, 0, 0, 0)
+        self._liked_whose_row.setSpacing(8)
+        self._liked_whose_group = QButtonGroup(self)
+        self._liked_whose_group.setExclusive(True)
+        self._liked_whose_group.idClicked.connect(self._on_liked_whose)
+        self._liked_whose.setVisible(False)
+        layout.addWidget(self._liked_whose)
+        layout.addSpacing(12)
+
         header = QHBoxLayout()
         header.setSpacing(11)
         ratio = self.devicePixelRatioF()
@@ -373,26 +465,34 @@ class MusicView(QWidget):
             f"{downloading} track{'s' if downloading != 1 else ''} still downloading — "
             "they'll appear as they finish" if downloading else "")
 
-        if not library.has_music() and not downloading:
+        theirs = _friends_albums() if tab == 0 else []
+        if not library.has_music() and not downloading and not theirs:
             self._pages.setCurrentWidget(self._empty)
             return
 
         if tab == 0:
-            rows = library.albums(self._sort.currentData())
+            order = self._sort.currentData()
+            rows = library.albums(order)
+            mine = {library.album_key(r["artist"] or "", r["title"] or "") for r in rows}
+            theirs = [item for item in theirs
+                      if library.album_key(item.artist or "", item.title) not in mine]
             if text:
                 rows = [r for r in rows if text in (r["title"] or "").lower()
                         or text in (r["artist"] or "").lower()]
-            self._fill(self._album_flow, [album_tile(r) for r in rows], AlbumCard)
+                theirs = [item for item in theirs if text in item.title.lower()
+                          or text in (item.artist or "").lower()]
+            self._fill(self._album_flow, _in_order([album_tile(r) for r in rows], theirs, order),
+                       AlbumCard)
             self._pages.setCurrentWidget(self._albums_page)
         elif tab == 1:
-            rows = library.artists()
+            rows = _with_friends_artists(library.artists())
             if text:
                 rows = [r for r in rows if text in (r["name"] or "").lower()]
             self._fill(self._artist_flow, [artist_tile(r) for r in rows], ArtistCard)
             self._pages.setCurrentWidget(self._artists_page)
         elif tab == 2:
             rows = library.search(text) if text else library.tracks()
-            self._songs.set_tracks(rows)
+            self._songs.set_tracks(_with_friends_songs([dict(r) for r in rows], text))
             self._pages.setCurrentWidget(self._songs)
             self._sync_current()
         elif tab == 4:
@@ -431,9 +531,71 @@ class MusicView(QWidget):
         if playlist_id is not None:
             self.show_playlist(playlist_id)
 
+    def _show_liked_whose(self) -> str:
+        """The Yours / <friend> chips over Liked: built again each time, since
+        friends come and go. Returns the chosen friend's name, or "" for yours."""
+        from .friend_library_view import friends_with_liked
+
+        friends = friends_with_liked()
+        if self._liked_friend is not None and self._liked_friend not in {fid for fid, _ in friends}:
+            self._liked_friend = None
+        for button in list(self._liked_whose_group.buttons()):
+            self._liked_whose_group.removeButton(button)
+            button.deleteLater()
+        while self._liked_whose_row.count():
+            self._liked_whose_row.takeAt(0)
+        self._liked_whose.setVisible(bool(friends))
+        name = ""
+        for button_id, label in [(0, "Yours")] + [(fid, f"{who}'s") for fid, who in friends]:
+            chip = QPushButton(label)
+            chip.setObjectName("Chip")
+            chip.setCheckable(True)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setChecked(button_id == (self._liked_friend or 0))
+            self._liked_whose_group.addButton(chip, button_id)
+            self._liked_whose_row.addWidget(chip)
+            if button_id and button_id == self._liked_friend:
+                name = label[:-2]
+        self._liked_whose_row.addStretch(1)
+        return name
+
+    def _on_liked_whose(self, button_id: int) -> None:
+        self._liked_friend = button_id or None
+        self._reload_liked()
+
     def _reload_liked(self, keep_scroll: bool = False) -> None:
         text = self._search.text().strip()
         needle = text.lower()
+        whose = self._show_liked_whose()
+        if whose:
+            # A friend's Liked Songs: their songs, played through their PC.
+            from .friend_library_view import liked_song_rows
+
+            rows = liked_song_rows(self._liked_friend)
+            total = len(rows)
+            if needle:
+                rows = [r for r in rows if any(needle in (r.get(key) or "").lower()
+                                               for key in ("title", "artist", "album"))]
+            self._liked.set_tracks(rows)
+            seconds = sum(float(r.get("duration") or 0) for r in rows)
+            count = f"{len(rows)} song{'s' if len(rows) != 1 else ''} {whose} liked"
+            self._liked_meta.setText(f"{len(rows)} of {total} songs {whose} liked" if needle and rows
+                                     else (f"{count}, {fmt_duration(seconds)}" if rows and fmt_duration(seconds)
+                                           else count if rows else ""))
+            playable = [r for r in rows if r.get("state") == "ready"]
+            self._liked_play.setVisible(bool(rows))
+            self._liked_shuffle.setVisible(bool(rows))
+            self._liked_play.setEnabled(bool(playable))
+            self._liked_shuffle.setEnabled(len(playable) > 1)
+            if rows:
+                self._liked_stack.setCurrentWidget(self._liked)
+            else:
+                self._liked_empty_title.setText(f"None of {whose}'s liked songs match “{text}”")
+                self._liked_empty_text.setText("")
+                self._liked_stack.setCurrentWidget(self._liked_empty)
+            self._sync_current()
+            return
+        self._liked_play.setEnabled(True)
         rows = [dict(r) for r in library.liked_tracks()]
         total = len(rows)
         if needle:
@@ -477,8 +639,20 @@ class MusicView(QWidget):
         self._sync_current()
 
     def _fill(self, flow: FlowLayout, tiles: list, card_type) -> None:
+        from .friend_library_view import FriendAlbumCard
+
         flow.clear()
         for tile in tiles:
+            if getattr(tile, "friend_id", None) is not None:
+                # A friend's album: its own card and menu, through their PC.
+                card = FriendAlbumCard(tile)
+                card.clicked.connect(self.friend_open_requested.emit)
+                card.play_requested.connect(self.friend_play_requested.emit)
+                card.action_requested.connect(
+                    lambda action, item: (self.friend_play_requested if action == "play"
+                                          else self.friend_open_requested).emit(item))
+                flow.addWidget(card)
+                continue
             card = card_type(tile)
             card.clicked.connect(self._open)
             card.play_requested.connect(lambda item: self._act("play", item))
@@ -538,14 +712,22 @@ class MusicView(QWidget):
         self._player.play_tracks(tracks, row, in_order=False,
                                  context=search_context(text) if text else dict(SONGS_CONTEXT))
 
+    def _liked_context(self) -> dict:
+        """"Playing from" for Liked: yours, or a friend's (their library's)."""
+        if self._liked_friend is not None:
+            friend = db.friend(self._liked_friend)
+            name = friend["name"] if friend is not None else "A friend"
+            return {"kind": "friend", "id": self._liked_friend, "album": None,
+                    "title": f"{name}'s liked songs"}
+        return liked_context(self._search.text().strip())
+
     def _play_liked(self, row: int) -> None:
         tracks = self._liked.tracks
         if tracks:
             # A mix of records, like Songs: each song levelled on its own.
-            self._player.play_tracks(tracks, row, in_order=False,
-                                     context=liked_context(self._search.text().strip()))
+            self._player.play_tracks(tracks, row, in_order=False, context=self._liked_context())
 
     def _shuffle_liked(self) -> None:
         tracks = self._liked.tracks
         if tracks:
-            self._player.shuffle_tracks(tracks, context=liked_context(self._search.text().strip()))
+            self._player.shuffle_tracks(tracks, context=self._liked_context())

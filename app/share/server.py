@@ -16,6 +16,10 @@ What a friend can ask for:
     night {kind, id}          a movie night of that film or episode on this PC,
                               for this PC's friends only: its code (nights.py);
           {at, party}         one again: from there, as the same party
+    thumbs {kind, id}         a film's seek-bar pictures: their layout, then one
+                              picture sheet as bytes after the answer line
+    lyrics {id}               a song's words, as this PC already has them (a
+                              .lrc beside it, its tags, or a lookup made here)
     listening {id, position,  which song of this library they are playing, so
                playing, next} the Friends page can offer to join them; the
                               answer carries a listening party's code once
@@ -58,6 +62,7 @@ MAX_LINE = 16 * 1024
 MAX_ART = 12 * 1024 * 1024          # a 4K backdrop is under 2 MB; this is a ceiling, not a target
 IDLE_TIMEOUT = 15 * 60.0            # a friend browsing leaves the channel open between clicks
 MAX_REQUESTS = 5000
+MAX_LYRICS = 200 * 1024             # a song's words; far more than any song has
 _IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
                 ".webp": "image/webp"}
 _PARTY_ID = re.compile(r"[0-9a-f]{32}")
@@ -178,6 +183,10 @@ def _answer(sock, friend, request: dict, listener, tokens: list[str]) -> None:
         _send_art(sock, request)
     elif kind == "play":
         _send_play(sock, friend, request, listener, tokens)
+    elif kind == "thumbs":
+        _send_thumbs(sock, request)
+    elif kind == "lyrics":
+        _send(sock, _lyrics(request))
     elif kind == "night":
         _send_night(sock, friend, request, listener)
     elif kind == "stop":
@@ -235,11 +244,117 @@ def _send_play(sock, friend, request: dict, listener, tokens: list[str]) -> None
         listener.withdraw(tokens.pop(0))
     token = listener.offer(path, row["duration"], friend["id"], quality or "original")
     tokens.append(token)
-    _send(sock, {"type": "play", "token": token, "port": listener.port,
-                 "kind": kind, "id": row["id"], "duration": row["duration"],
-                 "quality": quality or "original",
-                 "subtitles": listener.subtitles(token) if kind != "track" else []})
+    answer = {"type": "play", "token": token, "port": listener.port,
+              "kind": kind, "id": row["id"], "duration": row["duration"],
+              "quality": quality or "original",
+              "subtitles": listener.subtitles(token) if kind != "track" else []}
+    if kind in ("movie", "episode"):
+        answer.update(_extras(int(row["id"])))
+    _send(sock, answer)
     _log.info("share: %s is playing %s", friend["name"], os.path.basename(path))
+
+
+def _extras(media_id: int) -> dict:
+    """What this PC already knows about a film beyond the film itself, sent with
+    "play": where its intro and credits are (Skip intro, and Up Next at the
+    credits), and whether its seek-bar pictures can be asked for ("thumbs").
+
+    An episode with no marks of its own takes its show's: an intro marked once
+    for a series here is marked for every episode, and a friend gets the same.
+    """
+    row = db.query_one("SELECT show_id, duration, intro_start, intro_end, credits_at, thumbs "
+                       "FROM media WHERE id = ?", (media_id,))
+    if row is None:
+        return {}
+    intro_start, intro_end, credits_at = row["intro_start"], row["intro_end"], row["credits_at"]
+    if row["show_id"] and not (intro_end and intro_end > 0):
+        prefs = db.show_prefs(int(row["show_id"]))
+        intro_start, intro_end = prefs.get("intro_start"), prefs.get("intro_end")
+        length = prefs.get("credits_len")
+        if not credits_at and length and row["duration"] and row["duration"] > length:
+            credits_at = float(row["duration"]) - float(length)
+    marks = {}
+    for name, value in (("intro_start", intro_start), ("intro_end", intro_end),
+                        ("credits_at", credits_at)):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) \
+                and value >= 0:
+            marks[name] = float(value)
+    if "intro_end" not in marks or marks["intro_end"] <= marks.get("intro_start", 0.0):
+        marks.pop("intro_start", None)
+        marks.pop("intro_end", None)
+    return {"marks": marks, "thumbs": _sprite(row["thumbs"]) is not None}
+
+
+def _sprite(index_path: object) -> tuple[dict, str] | None:
+    """A film's seek-bar pictures here: (their layout, the picture sheet's
+    path), or None when it has none yet. The path stays on this PC."""
+    if not index_path or not isinstance(index_path, str):
+        return None
+    from ..metadata.thumbs import load_index
+
+    index = load_index(index_path)
+    if index is None:
+        return None
+    layout = {}
+    for name in ("count", "columns", "rows", "tile_width", "tile_height"):
+        value = index.get(name)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 10000:
+            layout[name] = value
+    for name in ("interval", "duration"):
+        value = index.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < 10 ** 6:
+            layout[name] = float(value)
+    if len(layout) < 7:
+        return None
+    return layout, str(index["sprite"])
+
+
+def _send_thumbs(sock, request: dict) -> None:
+    """A film's seek-bar pictures: the layout in the answer line, then the
+    sheet's bytes, the way a picture is sent ("art")."""
+    kind = request.get("kind")
+    number = request.get("id")
+    found = None
+    if kind in ("movie", "episode") and isinstance(number, int) and not isinstance(number, bool) \
+            and number > 0:
+        row = db.query_one("SELECT thumbs FROM media WHERE id = ? AND kind = ? AND missing = 0",
+                           (number, kind))
+        found = _sprite(row["thumbs"]) if row is not None else None
+    blob = b""
+    if found is not None:
+        try:
+            if os.path.getsize(found[1]) <= MAX_ART:
+                with open(found[1], "rb") as handle:
+                    blob = handle.read(MAX_ART)
+        except OSError:
+            blob = b""
+    if not blob:
+        _send(sock, {"type": "thumbs", "bytes": 0})
+        return
+    _send(sock, {"type": "thumbs", "bytes": len(blob), "layout": found[0]})
+    sock.sendall(blob)
+
+
+def _lyrics(request: dict) -> dict:
+    """A song's words as this PC has them: what the music player would show
+    here. Found here the same way (a .lrc beside the song, then its tags), and
+    looked up online only if this PC looks lyrics up itself; never for a song
+    this PC does not share."""
+    if not settings.get("sharing_music", True):
+        raise Refused(NO_MUSIC)
+    number = request.get("id")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise Refused(NOT_THERE)
+    row = db.query_one("SELECT id, path, title, artist, album_artist, album, duration FROM tracks "
+                       "WHERE id = ? AND state = 'ready' AND missing = 0", (number,))
+    if row is None:
+        raise Refused(NOT_THERE)
+    from ..music import lyrics
+
+    found = lyrics.find(dict(row), allow_online=bool(settings.get("fetch_lyrics", True)))
+    synced = "\n".join(f"[{int(at // 60):02d}:{at % 60:05.2f}]{line}" for at, line in found.lines)
+    return {"type": "lyrics", "source": found.source, "synced": synced[:MAX_LYRICS],
+            "plain": (found.plain or "")[:MAX_LYRICS]}
 
 
 def _send_night(sock, friend, request: dict, listener) -> None:

@@ -390,6 +390,12 @@ instead, which chats make clickable: it opens a page on Mistery's website that
 opens their Mistery's Join panel with the code filled in. The code rides after
 the `#` in the link, which a browser never sends, so the website never sees it.
 
+**A whole playlist.** A playlist page has a **Movie night** button. The host's
+panel lists the playlist's films under **Start with**, opening on the film the
+last night of that playlist got to (the next one if that was watched into its
+credits). At the end of each film the host gets **Next, together** with the
+playlist's next film. Nothing moves on by itself.
+
 **Staying together.** Anyone can play, pause or seek. The host's Mistery keeps
 the one clock everyone follows. Small drift is corrected by nudging playback
 speed by up to 5 %, and large drift by a seek. Measured across three Misterys,
@@ -487,6 +493,30 @@ Opening it asks their PC what has changed, and only that is sent. Play works
 while their PC is on: the film comes from their disk, with the subtitle files
 beside it. Your place in it is kept on your PC, never in your own library's
 watch history, and never on theirs.
+
+**Their things among yours.** Friends' films, shows, albums, artists and
+songs are on your own **Movies**, **Shows** and **Music** pages too, as if they
+were yours. Each title appears once: your own copy when you have it, otherwise
+a friend's whose PC answers. A friend's card says *from <name>* under the year.
+While their PC is off it stays on the page, dimmed, and says why it can't play
+yet; their songs say *<name>'s PC is off*. Mistery asks friends' PCs every four
+minutes (never from the tray or in game mode) which answer and what has changed.
+An artist you only have through a friend gets a page of their own.
+
+**Playlists, and their Liked Songs.** **Add to playlist** works on a friend's
+film, episode or song, so a playlist can mix yours and theirs. It plays in its
+order, Up Next moving on to whoever's is next, and an entry whose PC is off is
+skipped. A movie night streams from your PC, so a friend's film in a playlist is
+left out of the playlist's movie night. Each PC also tells its friends which
+songs it has liked: **Liked** on the Music page has a choice at the top between
+yours and each friend's.
+
+**What comes with a film or a song.** Besides the film itself and the subtitle
+files beside it, a friend's PC sends what it already has: the seek-bar
+pictures, where the intro and the credits are (so **Skip intro** and Up Next at
+the credits work; an episode with no marks of its own takes its show's), the
+categories, including ones set by hand, and a song's lyrics as their PC found
+them.
 
 **Watch together.** On a friend's film, or an episode's menu, **Watch together**
 starts a movie night of it on their PC, even with their Mistery closed. You

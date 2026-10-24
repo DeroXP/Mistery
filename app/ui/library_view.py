@@ -64,6 +64,19 @@ _FILTERS = ["All", "Unwatched", "In progress", "Watched"]
 _NOUNS = {"movies": ("film", "Find in Movies"), "shows": ("show", "Find in Shows")}
 
 
+def _is_friends(item) -> bool:
+    """A friend's film or show among yours (friend_library_view.FriendItem)."""
+    return getattr(item, "friend_id", None) is not None
+
+
+def _key(item):
+    """What a card's categories are kept under: your own by library id, a
+    friend's by whose and their id, which can be the same number as one of yours."""
+    if _is_friends(item):
+        return ("friend", item.friend_id, item.kind, item.remote_id)
+    return int(item.id)
+
+
 class _SortButton(QPushButton):
     """The sort order, as a pill that opens a short menu. Answers like the
     combo box it replaced (currentIndex, setCurrentIndex, currentIndexChanged)."""
@@ -126,6 +139,12 @@ class LibraryView(QWidget):
     open_show = Signal(object)
     add_folder_requested = Signal()
     shuffle_requested = Signal(list)        # the films on screen, for a shuffled line-up
+    # A friend's film or show among yours (friend_library_view.library_items):
+    # played, opened and watched together through their PC, as on Home.
+    friend_play_requested = Signal(object)
+    friend_open_requested = Signal(object)
+    friend_together_requested = Signal(object)
+    _friend_picture = Signal(int, str, int, str)   # friend, kind, their id, our copy (PictureFetchers)
 
     def __init__(self, mode: str = "movies", parent=None) -> None:
         super().__init__(parent)
@@ -162,7 +181,10 @@ class LibraryView(QWidget):
         self._shuffle.setIconSize(QSize(18, 18))
         self._shuffle.setToolTip("Play the films shown here, in a shuffled order")
         self._shuffle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._shuffle.clicked.connect(lambda: self.shuffle_requested.emit(list(self._shown)))
+        # Your own films only: a shuffle plays one film after another from your
+        # disk, and a friend's comes through their PC one at a time.
+        self._shuffle.clicked.connect(lambda: self.shuffle_requested.emit(
+            [item for item in self._shown if not _is_friends(item)]))
         title_row.addWidget(self._shuffle, 0, Qt.AlignmentFlag.AlignBottom)
         root.addLayout(title_row)
 
@@ -209,8 +231,8 @@ class LibraryView(QWidget):
         holder_layout.setContentsMargins(0, 4, 0, 40)
         self._grid = CardGrid()
         self._grid.item_clicked.connect(self._on_clicked)
-        self._grid.item_play_requested.connect(self.play_requested.emit)
-        self._grid.item_action.connect(self.item_action.emit)
+        self._grid.item_play_requested.connect(self._on_play)
+        self._grid.item_action.connect(self._on_action)
         holder_layout.addWidget(self._grid)
 
         self._empty = EmptyState()
@@ -225,6 +247,11 @@ class LibraryView(QWidget):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(180)
         self._debounce.timeout.connect(self._apply)
+
+        from .friend_library_view import PictureFetchers
+
+        self._pictures = PictureFetchers(self._friend_picture.emit)
+        self._friend_picture.connect(self._on_friend_picture)
 
         self.set_mode(mode)
 
@@ -274,8 +301,32 @@ class LibraryView(QWidget):
     def _on_search_changed(self) -> None:
         self._debounce.start()
 
+    def _on_play(self, item) -> None:
+        if _is_friends(item):
+            self.friend_play_requested.emit(item)
+        else:
+            self.play_requested.emit(item)
+
+    def _on_action(self, action: str, item) -> None:
+        """The card menus. A friend's card offers Play, Watch together and its
+        page (friend_library_view._FriendMenu), never anything that would
+        touch this library."""
+        if not _is_friends(item) or action == "playlist":
+            self.item_action.emit(action, item)     # the window's playlist menu takes either
+        elif action == "play":
+            if item.kind == "show":
+                self.friend_open_requested.emit(item)
+            else:
+                self.friend_play_requested.emit(item)
+        elif action == "together":
+            self.friend_together_requested.emit(item)
+        elif action == "details":
+            self.friend_open_requested.emit(item)
+
     def _on_clicked(self, item) -> None:
-        if isinstance(item, ShowItem):
+        if _is_friends(item):
+            self.friend_open_requested.emit(item)
+        elif isinstance(item, ShowItem):
             self.open_show.emit(item)
         else:
             self.open_media.emit(item)
@@ -283,19 +334,30 @@ class LibraryView(QWidget):
     # --- data ---------------------------------------------------------------
 
     def reload(self) -> None:
+        from .friend_library_view import library_items, without_own
+
         if self._mode == "shows":
             rows = db.all_shows()
             self._items = [ShowItem.from_row(r) for r in rows]
         else:
             rows = db.movies()
             self._items = [MediaItem.from_row(r) for r in rows]
+        # Friends' films and shows among yours, once each, and not the ones you
+        # have yourself (friend_library_view.library_items).
+        theirs = without_own(library_items("show" if self._mode == "shows" else "movie"),
+                             [(item.title, item.year) for item in self._items])
+        self._friends_count = len(theirs)
 
         # Categories come off the database row, not the view model: `user_genres`
         # is a column of its own so a refetch can't wipe a hand-set category, and
         # the dataclasses in models.py don't carry it. Built from every row
         # before any filtering, so a chosen category never vanishes from the
-        # popover just because it currently matches nothing.
+        # popover just because it currently matches nothing. A friend's come
+        # from their catalogue, which sends both already joined (catalog.py).
         self._categories = {int(r["id"]): frozenset(cat.categories_of(r)) for r in rows}
+        for item in theirs:
+            self._categories[_key(item)] = frozenset(cat.categories_of({"genres": item.genres}))
+        self._items += theirs
         counts = Counter(name for names in self._categories.values() for name in names)
         self._filter.set_available([(name, counts[name])
                                     for name in cat.CATEGORIES if name in counts])
@@ -309,7 +371,10 @@ class LibraryView(QWidget):
         items = self._items
         noun = _NOUNS.get(self._mode, ("title", ""))[0]
         bits = [f"{len(items)} {noun}{'' if len(items) == 1 else 's'}"]
+        if getattr(self, "_friends_count", 0):
+            bits.append(f"{self._friends_count} from friends")
         if self._mode == "shows":
+            items = [item for item in items if not _is_friends(item)]
             watching = sum(1 for show in items if 0 < show.watched_count < show.episode_count)
             done = sum(1 for show in items if show.episode_count and show.watched_count >= show.episode_count)
             if watching:
@@ -317,7 +382,8 @@ class LibraryView(QWidget):
             if done:
                 bits.append(f"{done} finished")
         else:
-            started = sum(1 for film in items if not film.watched and film.resume_position > 0)
+            started = sum(1 for film in items if not film.watched and (
+                film.position >= 30 if _is_friends(film) else film.resume_position > 0))
             watched = sum(1 for film in items if film.watched)
             if started:
                 bits.append(f"{started} in progress")
@@ -350,7 +416,7 @@ class LibraryView(QWidget):
             wanted = set(chosen)
             empty = frozenset()
             items = [i for i in items
-                     if cat.matches(wanted, self._categories.get(int(i.id), empty), mode)]
+                     if cat.matches(wanted, self._categories.get(_key(i), empty), mode)]
 
         state = self._filter_group.checkedId()
         if state == 1:
@@ -368,6 +434,18 @@ class LibraryView(QWidget):
         self._shuffle.setEnabled(bool(items))
         self._grid.set_items(items, self._empty_message(term, chosen, mode, state))
         self._count.setText(f"{len(items)} of {len(self._items)}")
+        if self.isVisible():
+            self._pictures.want([item for item in items if _is_friends(item)])
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        self._pictures.want([item for item in self._shown if _is_friends(item)])
+
+    def _on_friend_picture(self, friend_id: int, kind: str, remote_id: int, path: str) -> None:
+        from .friend_library_view import picture_arrived
+        from .widgets.cards import _BaseCard
+
+        picture_arrived(self._grid.findChildren(_BaseCard), friend_id, kind, remote_id, path)
 
     def _empty_message(self, term: str, chosen: list, mode: str, state: int) -> str:
         """Name every filter that is on, so it is clear what to undo."""

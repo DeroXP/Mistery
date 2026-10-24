@@ -179,18 +179,18 @@ def _art_mark(path: object) -> str | None:
 
 def _shows() -> list[dict]:
     rows = db.query(
-        "SELECT s.id, s.title, s.sort_title, s.year, s.genres, s.overview, s.poster, s.backdrop, "
+        "SELECT s.id, s.title, s.sort_title, s.year, s.genres, s.user_genres, s.overview, s.poster, s.backdrop, "
         "COUNT(m.id) AS episodes FROM shows s JOIN media m ON m.show_id = s.id "
         "AND m.kind = 'episode' AND m.missing = 0 GROUP BY s.id ORDER BY s.id")
     return [{"id": row["id"], "title": row["title"], "sort_title": row["sort_title"],
-             "year": row["year"], "genres": row["genres"], "overview": row["overview"],
+             "year": row["year"], "genres": _categories(row), "overview": row["overview"],
              "episodes": row["episodes"], "art": _art_mark(row["poster"]),
              "backdrop": _art_mark(row["backdrop"])} for row in rows]
 
 
 def _films() -> list[dict]:
     rows = db.query(
-        "SELECT id, title, sort_title, year, duration, genres, overview, tagline, rating, "
+        "SELECT id, title, sort_title, year, duration, genres, user_genres, overview, tagline, rating, "
         "width, height, hdr, video_codec, audio_codec, audio_channels, size, poster, backdrop "
         "FROM media WHERE kind = 'movie' AND missing = 0 ORDER BY id")
     return [_video(row) for row in rows]
@@ -215,10 +215,20 @@ def _video(row) -> dict:
         "audio_channels": row["audio_channels"], "size": row["size"],
         "art": _art_mark(row["poster"]), "backdrop": _art_mark(row["backdrop"]),
     }
-    for name in ("show_id", "season", "episode", "genres", "tagline"):
+    for name in ("show_id", "season", "episode", "tagline"):
         if name in keys:
             item[name] = row[name]
+    if "genres" in keys:
+        item["genres"] = _categories(row)
     return item
+
+
+def _categories(row) -> str:
+    """Its categories as this library files them: what a service said and what
+    was chosen here by hand, so a friend's Movies page filters it the same way."""
+    from ..metadata import categories
+
+    return ", ".join(categories.categories_of(row))
 
 
 def _albums() -> list[dict]:
@@ -236,13 +246,16 @@ def _albums() -> list[dict]:
 def _tracks() -> list[dict]:
     rows = db.query(
         "SELECT id, album_id, title, artist, album_artist, album, track_no, disc_no, year, "
-        "genre, duration, codec, bitrate FROM tracks WHERE state = 'ready' AND missing = 0 "
+        "genre, duration, codec, bitrate, liked FROM tracks WHERE state = 'ready' AND missing = 0 "
         "ORDER BY id")
+    # "liked": a friend's Liked tab shows your Liked Songs (the owner's wish,
+    # 2026-10-24: "we can also see liked songs of each others").
     return [{"id": row["id"], "album_id": row["album_id"], "title": row["title"],
              "artist": row["artist"], "album_artist": row["album_artist"],
              "album": row["album"], "track_no": row["track_no"], "disc_no": row["disc_no"],
              "year": row["year"], "genre": row["genre"], "duration": row["duration"],
-             "codec": row["codec"], "bitrate": row["bitrate"]} for row in rows]
+             "codec": row["codec"], "bitrate": row["bitrate"],
+             "liked": bool(row["liked"])} for row in rows]
 
 
 # --- what a friend's catalogue turns into here --------------------------------
@@ -286,6 +299,7 @@ def _clean(kind: str, row: object) -> dict | None:
         # an episode, and one table rather than two nearly identical ones.
         item["season"] = _whole(row.get("disc_no"), 0, 1000)
         item["episode"] = _whole(row.get("track_no"), 0, 100000)
+        item["liked"] = 1 if row.get("liked") is True else 0      # their Liked Songs
     return item
 
 

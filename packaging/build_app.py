@@ -89,6 +89,7 @@ SHARING_MODULES = (
     "app.share.identity", "app.share.pairing", "app.share.server", "app.share.client",
     "app.share.sharer", "app.share.background", "app.share.catalog", "app.share.art",
     "app.share.playback", "app.share.music", "app.share.nights", "app.party.media",
+    "app.share.reach",          # since 1.8.0: which friends' PCs answer (imported inside functions)
     "app.ui.friends_view", "app.ui.friend_library_view",
 )
 

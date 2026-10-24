@@ -158,6 +158,42 @@ def _as_dict(row) -> dict:
     return dict(row) if not isinstance(row, dict) else row
 
 
+def _with_address(item: dict) -> dict | None:
+    """A song with somewhere for mpv to fetch it from, or None.
+
+    A friend's song listed among yours (Songs, an artist's page, a playlist,
+    their Liked songs) has no address until it is played: its friend's song
+    relay gives it one (app/share/music.py Tunnel), which only opens a port on
+    this PC and asks their PC nothing until mpv comes for the song.
+    """
+    if not item.get("friend") or item.get("path"):
+        return item
+    from ..share import client
+    from ..share import music as friend_music
+
+    try:
+        tunnel = friend_music.tunnel(int(item["friend"]))
+    except (client.ShareError, OSError, ValueError) as problem:
+        _log.info("a friend's song can't be queued: %s", problem)
+        return None
+    item = dict(item)
+    item["path"] = tunnel.song_url(int(item.get("remote_id") or 0))
+    return item
+
+
+def _playable(tracks: list) -> list[dict]:
+    """The ready songs of `tracks`, each with an address (_with_address)."""
+    out = []
+    for track in tracks:
+        item = _as_dict(track)
+        if (item.get("state") or "ready") != "ready":
+            continue
+        item = _with_address(item)
+        if item is not None:
+            out.append(item)
+    return out
+
+
 def _device_setting() -> str:
     return str(settings.get("music_audio_device", "auto") or "auto")
 
@@ -653,7 +689,7 @@ class MusicPlayer(QObject):
         """
         if self._party is not None and self._party.takes_over(tracks, start, context):
             return
-        items = [_as_dict(t) for t in tracks if (_as_dict(t).get("state") or "ready") == "ready"]
+        items = _playable(tracks)
         if not items:
             return
         start_item = _as_dict(tracks[start]) if 0 <= start < len(tracks) else items[0]
@@ -676,7 +712,7 @@ class MusicPlayer(QObject):
         """The Shuffle button: turn shuffle on and start somewhere random."""
         if self._party is not None and self._party.takes_over(tracks, None, context, shuffle=True):
             return
-        items = [_as_dict(t) for t in tracks if (_as_dict(t).get("state") or "ready") == "ready"]
+        items = _playable(tracks)
         if not items:
             return
         self.set_shuffle(True, rebuild=False)
@@ -1038,7 +1074,9 @@ class MusicPlayer(QObject):
         if self._party is not None:
             self._party.add(track, next=True)
             return
-        item = _as_dict(track)
+        item = _with_address(_as_dict(track))
+        if item is None:
+            return
         if not self._queue:
             self.play_tracks([item], context=dict(_QUEUE_CONTEXT))
             return
@@ -1058,7 +1096,9 @@ class MusicPlayer(QObject):
         if self._party is not None:
             self._party.add(track)
             return
-        item = _as_dict(track)
+        item = _with_address(_as_dict(track))
+        if item is None:
+            return
         if not self._queue:
             self.play_tracks([item], context=dict(_QUEUE_CONTEXT))
             return

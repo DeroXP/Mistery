@@ -19,17 +19,36 @@ Nothing here touches Qt, and open() waits on the network: a worker thread's.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 from .. import db
+from ..config import thumbs_dir
 from ..party.guest_proxy import GuestProxy
 from . import client
 
 _log = logging.getLogger("share")
 
 PING_EVERY = 240.0      # well inside the server's IDLE_TIMEOUT (15 minutes)
+
+
+def _thumb_paths(friend_id: int, kind: str, remote_id: int) -> tuple[Path, Path]:
+    """Where a friend's seek-bar pictures for one film are kept here."""
+    folder = thumbs_dir() / "friends"
+    stem = f"{int(friend_id)}-{kind}-{int(remote_id)}"
+    return folder / f"{stem}.jpg", folder / f"{stem}.json"
+
+
+def forget_thumbs(friend_id: int) -> None:
+    """A friend removed: their seek-bar pictures go too."""
+    for path in (thumbs_dir() / "friends").glob(f"{int(friend_id)}-*"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -71,6 +90,69 @@ class Stream:
     def subtitles(self) -> list[dict]:
         listed = self.answer.get("subtitles")
         return listed if isinstance(listed, list) else []
+
+    @property
+    def marks(self) -> dict:
+        """Where their PC says the intro and the credits are: {"intro_start",
+        "intro_end", "credits_at"}, each only when known and a sane number."""
+        given = self.answer.get("marks")
+        if not isinstance(given, dict):
+            return {}
+        duration = self.duration or 10 ** 6
+        out = {}
+        for name in ("intro_start", "intro_end", "credits_at"):
+            value = given.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= duration:
+                out[name] = float(value)
+        return out
+
+    def thumbs(self) -> str | None:
+        """Their seek-bar pictures for this film, kept on this PC: the layout
+        file's path for the player's preview, or None when they have none.
+
+        Asked on the stream's own channel, between pings, and kept under the
+        thumbnails folder by friend, kind and id, so the next time it plays
+        nothing is asked for again. Blocking: a worker thread's."""
+        if not self.answer.get("thumbs"):
+            return None
+        sheet, layout_path = _thumb_paths(self.friend_id, self.kind, self.remote_id)
+        if layout_path.is_file() and sheet.is_file():
+            return str(layout_path)
+        with self._lock:
+            channel = self._channel
+        if channel is None:
+            return None
+        try:
+            with self._talk:
+                if self._closed.is_set():
+                    return None
+                found = channel.thumbs(self.kind, self.remote_id)
+        except (client.ShareError, OSError) as problem:
+            _log.info("share: no seek pictures from friend %d: %s", self.friend_id, problem)
+            return None
+        if found is None:
+            return None
+        layout, blob = found
+        if not blob.startswith(b"\xff\xd8"):
+            return None                         # a picture sheet is a JPEG; nothing else is kept
+        clean = {}
+        for name in ("count", "columns", "rows", "tile_width", "tile_height"):
+            value = layout.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 10000:
+                clean[name] = value
+        for name in ("interval", "duration"):
+            value = layout.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < 10 ** 6:
+                clean[name] = float(value)
+        if len(clean) < 7:
+            return None
+        try:
+            sheet.parent.mkdir(parents=True, exist_ok=True)
+            sheet.write_bytes(blob)
+            layout_path.write_text(json.dumps({**clean, "sprite": str(sheet)}), encoding="utf-8")
+        except OSError:
+            return None
+        return str(layout_path)
 
     def open(self) -> str:
         """Ask their PC for it and return the URL for mpv. ShareError (or

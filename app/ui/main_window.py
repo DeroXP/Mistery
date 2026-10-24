@@ -57,6 +57,7 @@ _NAV = [
 ]
 _NAV_SEARCH = next(i for i, (name, _) in enumerate(_NAV) if name == "search")
 _NAV_MOVIES = next(i for i, (name, _) in enumerate(_NAV) if name == "film")
+_NAV_SHOWS = next(i for i, (name, _) in enumerate(_NAV) if name == "tv")
 _NAV_SETTINGS = next(i for i, (name, _) in enumerate(_NAV) if name == "settings")
 _NAV_MUSIC = next(i for i, (name, _) in enumerate(_NAV) if name == "music")
 _NAV_PLAYLISTS = next(i for i, (name, _) in enumerate(_NAV) if name == "queue")
@@ -68,6 +69,8 @@ class MainWindow(QMainWindow):
     # opened stream or None, the sentence for the page when it is None).
     _friend_opened = Signal(object, object, str)
     _together_ready = Signal(object, str, str)      # FriendItem, its movie night's code, or why not
+    _friend_thumbs = Signal(object, str)            # a friend's stream, its seek pictures kept here
+    _friends_changed = Signal()                     # a friend's PC came or went, or their library changed
     _presence_changed = Signal()                    # a friend started or stopped listening to our music
 
     def __init__(self) -> None:
@@ -208,6 +211,16 @@ class MainWindow(QMainWindow):
         self._music_watch.timeout.connect(self._watch_music)
         self._music_watch.start(30_000)
 
+        # Friends' PCs: which answer (their titles on Movies, Shows and Music are
+        # dimmed while one does not), and what has changed in their libraries.
+        # Asked a few seconds after start, then every few minutes; not while the
+        # window is in the tray or game mode (_set_background_mode).
+        self._reach_timer = QTimer(self)
+        self._reach_timer.setInterval(int(4 * 60 * 1000))
+        self._reach_timer.timeout.connect(self._check_friends)
+        self._reach_timer.start()
+        QTimer.singleShot(4000, self, self._check_friends)
+
         # The movie night session, once the window is up rather than during
         # startup: importing it costs 15-22 ms (sync pulls in statistics and
         # decimal), and making it takes back a router forward that a crash left
@@ -219,6 +232,23 @@ class MainWindow(QMainWindow):
         # Friends listening to this library's music (share/presence.py), and
         # telling friends which of theirs plays here.
         QTimer.singleShot(3000, self, self._start_presence)
+
+    def _check_friends(self) -> None:
+        """Ask friends' PCs whether they answer, and for what has changed in
+        their libraries (app/share/reach.py), on a thread; the pages that list
+        their titles are drawn again afterwards if anything changed."""
+        if self._in_tray or not db.friends(include_paused=False):
+            return
+        from ..share import reach
+
+        reach.check(lambda changed: changed and self._friends_changed.emit())
+
+    def _on_friends_changed(self) -> None:
+        """A friend came or went, or their library changed: the page on screen
+        draws its friends' titles again; the others do when next shown."""
+        current = self.stack.currentWidget()
+        if current in (self.movies, self.shows, self.music_page):
+            current.reload()
 
     @staticmethod
     def _start_sharing() -> None:
@@ -328,6 +358,12 @@ class MainWindow(QMainWindow):
             view.open_media.connect(self.open_media)
             view.open_show.connect(self.open_show)
             view.add_folder_requested.connect(self._add_folder)
+            # A friend's film or show among yours goes through their PC, and its
+            # page opens without leaving Movies or Shows in the sidebar.
+            view.friend_play_requested.connect(self.play_friend)
+            view.friend_together_requested.connect(self.watch_together)
+            view.friend_open_requested.connect(
+                lambda item, page=view: self.open_friend_item(item, from_page=page))
         # Search finds everything: films, shows and episodes, music, and what
         # friends share, and opens or plays each the way its own page would.
         self.search.play_requested.connect(lambda item: self.play(item))
@@ -347,6 +383,13 @@ class MainWindow(QMainWindow):
         self.playlists_page.item_action.connect(self._on_card_action)
         self.playlists_page.open_media.connect(self.open_media)
         self.playlists_page.open_playlist.connect(self.open_playlist)
+        self.playlists_page.movie_night_requested.connect(self.start_movie_night)
+        # A friend's film in a playlist: played through their PC with the rest of
+        # the list going with it, so Up Next carries on into your own films.
+        self.playlists_page.friend_play_requested.connect(
+            lambda item: self.play_friend(item, line_up=self.playlists_page.line_up))
+        self.playlists_page.friend_open_requested.connect(
+            lambda item: self.open_friend_item(item, from_page=self.playlists_page))
 
         self.show_page.item_action.connect(self._on_card_action)
 
@@ -384,12 +427,20 @@ class MainWindow(QMainWindow):
         self.player.error.connect(self._on_player_error)
         # The player's menu: "Watch together" on what is playing, and the host's
         # way back to the panel with the code on it (the top bar is hidden there).
+        # A film played from a playlist turns into a movie night of the playlist.
         self.player.party_requested.connect(
-            lambda: self.start_movie_night(self.player.current_item))
+            lambda: self.start_movie_night(self.player.current_item, self.player.line_up))
         self.player.party_panel_requested.connect(self.show_movie_night)
+        # The next entry of a playlist is a friend's film: asked of their PC, the
+        # player's line-up (already moved on to it) going with it.
+        self.player.friend_line_requested.connect(
+            lambda item: self.play_friend(item, line_up=(self.player.line_up, self.player.line_index)))
 
         self.music_page.album_opened.connect(self.open_album)
         self.music_page.artist_opened.connect(self.open_artist)
+        self.music_page.friend_play_requested.connect(self.play_friend)
+        self.music_page.friend_open_requested.connect(
+            lambda item: self.open_friend_item(item, from_page=self.music_page))
         # "Added to Road trip." from a song's right-click menu. The music pages
         # have no status bar of their own, and the page itself does not change
         # when a song joins a list that is not on screen.
@@ -400,13 +451,19 @@ class MainWindow(QMainWindow):
         self.album_page.artist_requested.connect(self.open_artist)
         self.artist_page.back_requested.connect(self.go_back)
         self.artist_page.album_requested.connect(self.open_album)
+        self.artist_page.friend_play_requested.connect(self.play_friend)
+        self.artist_page.friend_open_requested.connect(
+            lambda item: self.open_friend_item(item, from_page=self.music_page))
         self.friends_page.open_friend.connect(self.open_friend_library)
         self.friends_page.join_them.connect(self.join_listening_friend)
         self.friends_page.join_party.connect(self.join_friend_party)
         self.friend_library.back_requested.connect(self.go_back)
         self.friend_library.play_requested.connect(self.play_friend)
         self._friend_opened.connect(self._on_friend_opened)
+        self._friend_thumbs.connect(self._on_friend_thumbs)
+        self._friends_changed.connect(self._on_friends_changed)
         self.friend_library.together_requested.connect(self.watch_together)
+        self.friend_library.playlist_requested.connect(lambda item: self._on_card_action("playlist", item))
         self._together_ready.connect(self._on_together_ready)
         self.music.queue_changed.connect(self._follow_friend_music)
         self.now_playing.back_requested.connect(self.go_back)
@@ -650,16 +707,20 @@ class MainWindow(QMainWindow):
 
     # --- friends' libraries -------------------------------------------------
 
-    def open_friend_library(self, friend_id: int) -> None:
+    def open_friend_library(self, friend_id: int, nav: int | None = _NAV_FRIENDS) -> None:
         """A friend's films, shows and music: under Friends in the top bar."""
         self.friend_library.set_friend(friend_id)
         self._go(self.friend_library)
-        self._sync_nav(_NAV_FRIENDS)
+        self._sync_nav(nav)
 
-    def open_friend_item(self, item) -> None:
-        """Something of a friend's, from Home or Search: its page in their
-        library, a film's, show's or album's own, or an episode's show."""
-        self.open_friend_library(item.friend_id)
+    def open_friend_item(self, item, from_page=None) -> None:
+        """Something of a friend's, from Home, Search or one of your own pages:
+        its page in their library, a film's, show's or album's own, or an
+        episode's show. From Movies, Shows or Music the sidebar stays where it
+        was, since there it is one of your titles as far as the page goes."""
+        nav = {self.movies: _NAV_MOVIES, self.shows: _NAV_SHOWS, self.music_page: _NAV_MUSIC,
+               self.playlists_page: _NAV_PLAYLISTS}.get(from_page, _NAV_FRIENDS)
+        self.open_friend_library(item.friend_id, nav)
         if item.kind == "movie":
             self.friend_library.open_film(item)
         elif item.kind == "show":
@@ -679,12 +740,14 @@ class MainWindow(QMainWindow):
         else:
             self._on_status(text)
 
-    def play_friend(self, item) -> None:
+    def play_friend(self, item, line_up: tuple[list[int], int] | None = None) -> None:
         """Play something of a friend's (app/ui/friend_library_view.FriendItem).
 
         Their PC is asked for it on a thread, since that is a connection and a
         question to a PC that may be off: _on_friend_opened takes it from there,
-        with the stream or with the sentence saying why not.
+        with the stream or with the sentence saying why not. `line_up` is the
+        playlist it was played from, which the player then follows (Up Next
+        into the next entry, yours or a friend's).
         """
         if item.kind in ("album", "track"):
             self._play_friend_music(item)
@@ -692,15 +755,18 @@ class MainWindow(QMainWindow):
         friend = db.friend(item.friend_id)
         if friend is None:
             return
+        self._friend_line_up = (item.ref_id, line_up) if line_up else None
         self._say_friend(f"Asking {friend['name']}'s PC for {item.title}…")
 
         def open_it() -> None:
-            from ..share import client, playback
+            from ..share import client, playback, reach
 
             stream = playback.Stream(item.friend_id, item.kind, item.remote_id)
             try:
                 stream.open()
             except client.ShareError as problem:
+                if isinstance(problem, client.Unreachable):
+                    reach.set_state(item.friend_id, False)      # dimmed on your pages from now
                 self._friend_opened.emit(item, None, str(problem))
             except Exception:               # noqa: BLE001 - said on the page
                 logging.getLogger("share").exception("share: opening a friend's film failed")
@@ -771,7 +837,15 @@ class MainWindow(QMainWindow):
         dialog._join_clicked()
 
     def _on_friend_opened(self, item, stream, problem: str) -> None:
+        pending = getattr(self, "_friend_line_up", None)
+        line_up = pending[1] if pending and pending[0] == getattr(item, "ref_id", None) else None
         if stream is None:
+            if line_up and self.stack.currentWidget() is self.player and self.player.is_active:
+                # Moving on through a playlist from inside the player: what is
+                # on screen stays, and the picture says why the next did not come.
+                self.player.overlay.show_message(problem, 6000)
+                self.player.overlay.wake()
+                return
             if self.stack.currentWidget() is not self.friend_library:
                 # Started from Home: the whole reason is longer than the top
                 # bar's line, so it goes on the title's own page, beside Play.
@@ -798,22 +872,39 @@ class MainWindow(QMainWindow):
             subtitle = " · ".join(bit for bit in (str(item.year or ""), f"from {name}") if bit)
         # No id and no path of this library's: the player keeps it out of every
         # table of yours (PlayerView.play_friend).
-        media = MediaItem(title=title, year=item.year, duration=stream.duration or item.duration or 0.0)
+        # Their PC's marks for the intro and the credits come with the stream, so
+        # Skip intro and Up Next at the credits work as they do for your own.
+        marks = stream.marks
+        media = MediaItem(title=title, year=item.year, duration=stream.duration or item.duration or 0.0,
+                          intro_start=marks.get("intro_start"), intro_end=marks.get("intro_end"),
+                          credits_at=marks.get("credits_at"))
         start = item.position if 0 < item.progress < 0.97 else 0.0
         if settings.get("pause_background_during_playback", True):
             self.service.set_paused(True)
         if self.music.is_playing:
             self.music.pause()
-        self.player.set_line_up([], 0)
+        # Played from a playlist: the player follows it from this entry on.
+        self.player.set_line_up(*(line_up or ([], 0)))
         self._go(self.player)
         self._sync_nav(None)
         QApplication.processEvents()
-        QTimer.singleShot(0, lambda: self._begin_friend_playback(media, stream, start, subtitle))
+        QTimer.singleShot(0, lambda: self._begin_friend_playback(media, stream, start, subtitle,
+                                                                 bool(line_up)))
 
-    def _begin_friend_playback(self, media: MediaItem, stream, start: float, subtitle: str) -> None:
-        if not self.player.play_friend(media, stream, start, subtitle):
+    def _begin_friend_playback(self, media: MediaItem, stream, start: float, subtitle: str,
+                               keep_line_up: bool = False) -> None:
+        if not self.player.play_friend(media, stream, start, subtitle, keep_line_up=keep_line_up):
             self._on_player_closed()
             self._say_friend("The video player could not start.")
+            return
+        # Their seek-bar pictures, asked for once the film is playing (a picture
+        # sheet of a few hundred KB, on the stream's own connection).
+        threading.Thread(target=lambda: self._friend_thumbs.emit(stream, stream.thumbs() or ""),
+                         name="share-thumbs", daemon=True).start()
+
+    def _on_friend_thumbs(self, stream, index_path: str) -> None:
+        if index_path and self.player.friend_stream is stream:
+            self.player.overlay.set_thumbnails(index_path)
 
     def _play_friend_music(self, item) -> None:
         """A friend's album, or one of its songs with the rest of the album
@@ -962,10 +1053,12 @@ class MainWindow(QMainWindow):
             self._external_watch.stop()
             self._music_watch.stop()
             self._art_retry.stop()
+            self._reach_timer.stop()
         else:
             self._external_watch.start()
             self._schedule_music_watch()
             self._art_retry.start()
+            self._reach_timer.start()
         # No window, no controller: its look for one every 2 s stops too.
         couch = getattr(self, "couch", None)
         if couch is not None:
@@ -1012,8 +1105,15 @@ class MainWindow(QMainWindow):
         # previous artist's page on screen (Play played them) with the Back
         # history emptied.
         if not music_library.artist_albums(name):
-            self._on_status(f"No albums by {name} in the library.")
-            return
+            # Perhaps one you only have through a friend (their albums are on
+            # the artist's page too: album_view.ArtistView).
+            from .friend_library_view import friends_albums_not_mine
+
+            wanted = music_library.artist_key(name)
+            if not any(music_library.artist_key(album.artist or "Unknown Artist") == wanted
+                       for album in friends_albums_not_mine()):
+                self._on_status(f"No albums by {name} in the library.")
+                return
         self.artist_page.set_artist(music_library.artist_name(name))
         self._go(self.artist_page)
         self._sync_nav(None)
@@ -1320,7 +1420,10 @@ class MainWindow(QMainWindow):
             # the database); the second menu is popped here, at the pointer.
             from .widgets.playlist_menu import add_to_playlist_menu
 
-            menu = add_to_playlist_menu(self, "video", [item.id], self._on_playlist_change)
+            # A friend's film or episode goes in under its own number (ref_id),
+            # beside yours.
+            number = item.ref_id if getattr(item, "friend_id", None) is not None else item.id
+            menu = add_to_playlist_menu(self, "video", [number], self._on_playlist_change)
             menu.exec(QCursor.pos())
         elif action == "watched":
             db.set_watched(item.id, not item.watched)
@@ -1457,13 +1560,18 @@ class MainWindow(QMainWindow):
             self._party.error.connect(self._on_status)
         return self._party
 
-    def start_movie_night(self, item) -> None:
-        """Start movie night, from a film's page, an episode, or the player: the
-        host's panel, ready to start (or the movie night already on)."""
+    def start_movie_night(self, item, line_up: list[int] | None = None, pick_up: bool = False) -> None:
+        """Start movie night, from a film's page, an episode, a playlist or the
+        player: the host's panel, ready to start (or the movie night already on).
+        line_up is a playlist's media ids, which the night then goes through;
+        pick_up starts it where the last night of that list got to."""
         if item is None or not getattr(item, "id", 0):
             return
+        # A movie night streams from this PC: a friend's film in the list (a
+        # negative number, friend_library_view.ref_id) is not part of it.
+        line_up = [int(i) for i in line_up if int(i) > 0] if line_up else None
         dialog = self._host_panel()
-        dialog.prepare(item)
+        dialog.prepare(item, line_up, pick_up)
         self._show_dialog(dialog)
 
     def continue_movie_night(self, row) -> None:

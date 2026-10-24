@@ -36,6 +36,12 @@ _ROW_ACTIONS = [("Move up", "up"), ("Move down", "down"),
                 ("Remove from this playlist", "unlist")]
 
 
+def _number(item) -> int:
+    """An entry's number in the line-up: your own film's id, or a friend's
+    film's (negative) one (friend_library_view.ref_id)."""
+    return item.ref_id if getattr(item, "friend_id", None) is not None else int(item.id)
+
+
 class _PlaylistTile:
     """What a WideCard needs to draw a playlist: a still, a name, a size.
 
@@ -95,6 +101,9 @@ class PlaylistsView(QWidget):
     open_media = Signal(object)              # a media row, opened in its page
     item_action = Signal(str, object)        # the card menu, as the library pages emit it
     open_playlist = Signal(int)              # a tile was opened; the window routes it
+    movie_night_requested = Signal(object, object, bool)  # a media row, the list's ids, pick up where it got to
+    friend_play_requested = Signal(object)   # a friend's film in the list (FriendItem), played through their PC
+    friend_open_requested = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -193,6 +202,14 @@ class PlaylistsView(QWidget):
         self._play_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play_all.clicked.connect(lambda: self._play_item(0))
         actions.addWidget(self._play_all)
+        # The whole list with friends: the night goes through it in this order,
+        # the host's Next together moving everyone on at the end of each film.
+        self._movie_night = QPushButton("Movie night")
+        self._movie_night.setObjectName("Ghost")
+        self._movie_night.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._movie_night.setToolTip("Watch this playlist with friends, in this order")
+        self._movie_night.clicked.connect(lambda: self._movie_night_from(0, pick_up=True))
+        actions.addWidget(self._movie_night)
         for label, slot in (("Rename", self._rename), ("Delete", self._delete)):
             button = QPushButton(label)
             button.setObjectName("Ghost")
@@ -212,7 +229,9 @@ class PlaylistsView(QWidget):
         inner_layout = QVBoxLayout(inner)
         inner_layout.setContentsMargins(0, 0, 0, 40)
         self._grid = CardGrid(wide=True)
-        self._grid.item_clicked.connect(self.open_media.emit)
+        self._grid.item_clicked.connect(
+            lambda item: (self.friend_open_requested if getattr(item, "friend_id", None) is not None
+                          else self.open_media).emit(item))
         self._grid.item_play_requested.connect(self._play_card)
         self._grid.item_action.connect(self._on_item_action)
         inner_layout.addWidget(self._grid)
@@ -241,7 +260,7 @@ class PlaylistsView(QWidget):
         not from a search by id, so a film listed twice still advances from the
         copy you pressed.
         """
-        return [item.id for item in self._items], self._played
+        return [_number(item) for item in self._items], self._played
 
     def reload(self) -> None:
         if self._playlist_id is None:
@@ -253,11 +272,22 @@ class PlaylistsView(QWidget):
             self._show_index()
             return
         self._level.setCurrentIndex(1)
+        from .friend_library_view import video_by_ref
+
         entries = db.playlist_entries(self._playlist_id)
         media = {int(m["id"]): m for m in db.playlist_media(self._playlist_id)}
         self._items, self._entries = [], []
         for entry in entries:
-            found = media.get(int(entry["item_id"]))
+            number = int(entry["item_id"])
+            if number < 0:
+                # A friend's film or episode (friend_library_view.ref_id): dimmed
+                # while their PC does not answer, gone while they are not a friend.
+                found = video_by_ref(number)
+                if found is not None:
+                    self._items.append(found)
+                    self._entries.append(int(entry["id"]))
+                continue
+            found = media.get(number)
             if found is not None:
                 self._items.append(MediaItem.from_row(found))
                 self._entries.append(int(entry["id"]))
@@ -287,6 +317,12 @@ class PlaylistsView(QWidget):
             bits.append(f"{held - len(self._items)} not available right now")
         self._meta.setText("  ·  ".join(bits))
         self._play_all.setEnabled(bool(self._items))
+        own = [item for item in self._items if getattr(item, "friend_id", None) is None]
+        self._movie_night.setEnabled(bool(own))
+        self._movie_night.setToolTip(
+            "Watch this playlist with friends, in this order"
+            + (" (a movie night plays from your PC, so friends' films in it are left out)"
+               if len(own) < len(self._items) else ""))
 
     def _reload_index(self) -> None:
         self._level.setCurrentIndex(0)
@@ -362,7 +398,27 @@ class PlaylistsView(QWidget):
         if not 0 <= index < len(self._items):
             return
         self._played = index
-        self.play_requested.emit(self._items[index])
+        item = self._items[index]
+        if getattr(item, "friend_id", None) is not None:
+            self.friend_play_requested.emit(item)     # through their PC, the list going with it
+        else:
+            self.play_requested.emit(item)
+
+    def _movie_night_from(self, index: int, pick_up: bool = False) -> None:
+        """The host's panel for this list, ready on the film at `index` (the panel
+        lets the host pick another, and leads with where the last night got to)."""
+        if not 0 <= index < len(self._items):
+            return
+        # A movie night streams from this PC, so a friend's film in the list is
+        # left out of it (theirs can be watched together on their PC instead):
+        # the panel lists, and the night goes through, your own films only.
+        own = [item for item in self._items if getattr(item, "friend_id", None) is None]
+        if not own:
+            return
+        chosen = self._items[index]
+        if getattr(chosen, "friend_id", None) is not None:
+            chosen = next((item for item in self._items[index:] if item in own), own[0])
+        self.movie_night_requested.emit(chosen, [item.id for item in own], pick_up)
 
     def _on_item_action(self, action: str, item) -> None:
         """The card menu. The three this page added are handled here; everything
@@ -372,6 +428,18 @@ class PlaylistsView(QWidget):
             # menu carries the rest of the list the way the card's own play
             # circle does.
             self._play_card(item)
+            return
+        if getattr(item, "friend_id", None) is not None and action in ("together", "details"):
+            # A friend's film: Watch together is a night on their PC; its page is
+            # in their library.
+            if action == "details":
+                self.friend_open_requested.emit(item)
+            else:
+                self.item_action.emit("together", item)
+            return
+        if action == "party":
+            # Start movie night on a card here is the playlist's night, from it.
+            self._movie_night_from(next((i for i, m in enumerate(self._items) if m is item), 0))
             return
         if action in ("up", "down", "unlist") and self._playlist_id is not None:
             index = next((i for i, m in enumerate(self._items) if m is item), None)

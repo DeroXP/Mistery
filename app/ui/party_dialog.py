@@ -958,6 +958,7 @@ class HostDialog(_MovieNightDialog):
         self.facts: NetworkFacts | None = None
         self._previous = None               # an earlier movie night of the same thing
         self._episodes: list[MediaItem] = []
+        self._line_up: list[int] | None = None  # a playlist's media ids: the night goes through them
         self._facts_ready.connect(self._on_facts)
         self._copied_timer = QTimer(self)
         self._copied_timer.setSingleShot(True)
@@ -979,9 +980,9 @@ class HostDialog(_MovieNightDialog):
         episode_row = QHBoxLayout(self.episode_row)
         episode_row.setContentsMargins(0, 0, 0, 0)
         episode_row.setSpacing(14)
-        caption = QLabel("Episode")
-        caption.setStyleSheet(f"color: {C.TEXT_DIM};")
-        episode_row.addWidget(caption)
+        self._choice_caption = QLabel("Episode")
+        self._choice_caption.setStyleSheet(f"color: {C.TEXT_DIM};")
+        episode_row.addWidget(self._choice_caption)
         self.episode_choice = QComboBox()
         self.episode_choice.setMaxVisibleItems(16)
         self.episode_choice.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1241,9 +1242,16 @@ class HostDialog(_MovieNightDialog):
 
     # --- entry ---------------------------------------------------------------------
 
-    def prepare(self, item: MediaItem) -> None:
+    def prepare(self, item: MediaItem, line_up: list[int] | None = None,
+                pick_up: bool = False) -> None:
         """Before a movie night of item: what happens, and the Start button.
-        With one already on, that one instead: there is one port, and one room."""
+        With one already on, that one instead: there is one port, and one room.
+
+        line_up makes it a playlist's night: the chooser lists the playlist's
+        films, and the night follows the list. pick_up starts the chooser on
+        the film the last night of this list got to (the next one, if that one
+        was watched to its credits) rather than on item: a marathon spread over
+        several evenings carries on where it stopped."""
         self._look_up_network()
         self.say_notice("")
         if self.session.role == "guest":
@@ -1257,17 +1265,20 @@ class HostDialog(_MovieNightDialog):
                                 "another.")
             self.show_running()
             return
+        self._line_up = [int(i) for i in line_up] if line_up and item.id in line_up else None
         self.item = item
-        self._fill_episodes(item)
-        self._show_item(item, choosing=len(self._episodes) > 1)
+        self._fill_episodes(item, pick_up)
+        self._show_item(self.item, choosing=len(self._episodes) > 1)
         self._show_state(self.READY)
 
     def start(self, item: MediaItem, party_id: str | None = None,
-              start_at: float | None = None) -> None:
-        """Start at once: Continue on Home, or Start in the ready panel."""
+              start_at: float | None = None, line_up: list[int] | None = None) -> None:
+        """Start at once: Continue on Home, or Start in the ready panel (which
+        passes the playlist it was prepared with)."""
         if self.session.role is not None:
             self.prepare(item)
             return
+        self._line_up = [int(i) for i in line_up] if line_up and item.id in line_up else None
         self.item = item
         self._look_up_network()
         self.say_notice("")
@@ -1278,7 +1289,11 @@ class HostDialog(_MovieNightDialog):
         try:
             # False comes with an `error` first (the file has gone, say), which
             # has already turned this panel into the sentence.
-            self.session.start_host(item, quality, party_id=party_id, start_at=start_at)
+            if self._line_up:
+                self.session.start_host(item, quality, party_id=party_id, start_at=start_at,
+                                        line_up=self._line_up)
+            else:
+                self.session.start_host(item, quality, party_id=party_id, start_at=start_at)
         except Exception as exc:            # a bug, but the host still deserves a sentence
             _log.exception("start_host failed")
             self._on_error(f"The movie night couldn't start: {exc}")
@@ -1296,21 +1311,57 @@ class HostDialog(_MovieNightDialog):
 
     # --- ready ---------------------------------------------------------------------
 
-    def _fill_episodes(self, item: MediaItem) -> None:
+    def _fill_episodes(self, item: MediaItem, pick_up: bool = False) -> None:
         """For an episode, the rest of its show, so the party's episode can be
         picked here: the host's own next episode (7, say) is often not the
-        one the friends are on (3)."""
+        one the friends are on (3). For a playlist's night, the playlist, in
+        its order, numbered, so the evening can start part-way down it."""
         self.episode_choice.blockSignals(True)
         self.episode_choice.clear()
         self._episodes = []
-        if item.is_episode and item.show_id:
+        if self._line_up:
+            self._choice_caption.setText("Start with")
+            for media_id in self._line_up:
+                row = db.get_media(media_id)
+                if row is not None and not row["missing"]:
+                    self._episodes.append(MediaItem.from_row(row))
+            for number, film in enumerate(self._episodes, start=1):
+                name = film.display_title or film.title
+                if film.is_episode:
+                    show = db.get_show(film.show_id) if film.show_id else None
+                    name = f"{show['title']}: {film.code}" if show is not None else name
+                self.episode_choice.addItem(f"{number}. {name}", film.id)
+            if pick_up:
+                where = self._where_the_list_got_to()
+                if where is not None:
+                    item = self._episodes[where]
+                    self.item = item
+        elif item.is_episode and item.show_id:
+            self._choice_caption.setText("Episode")
             self._episodes = [MediaItem.from_row(row) for row in db.episodes_for_show(item.show_id)]
             for episode in self._episodes:
                 self.episode_choice.addItem(episode.display_title or episode.title, episode.id)
+        if self._episodes:
             index = self.episode_choice.findData(item.id)
             self.episode_choice.setCurrentIndex(max(0, index))
         self.episode_row.setVisible(len(self._episodes) > 1)
         self.episode_choice.blockSignals(False)
+
+    def _where_the_list_got_to(self) -> int | None:
+        """Which of the playlist's films the last movie night of it reached: the
+        most recent night this PC hosted of any of them. Watched into its
+        credits (the last 7 %), it is the film after; None when no night of
+        the list has been held, or the last one finished the list."""
+        place = {film.id: number for number, film in enumerate(self._episodes)}
+        for row in db.recent_parties(40):
+            if row["role"] != "host" or row["media_id"] not in place:
+                continue
+            number = place[row["media_id"]]
+            length = float(self._episodes[number].duration or 0)
+            if length and float(row["position"] or 0) >= length * 0.93:
+                number += 1
+            return number if number < len(self._episodes) else None
+        return None
 
     def _on_episode_chosen(self, index: int) -> None:
         if 0 <= index < len(self._episodes):
@@ -1370,11 +1421,12 @@ class HostDialog(_MovieNightDialog):
     def _continue_previous(self) -> None:
         row = self._previous
         if row is not None and self.item is not None:
-            self.start(self.item, party_id=row["party_id"], start_at=float(row["position"] or 0))
+            self.start(self.item, party_id=row["party_id"], start_at=float(row["position"] or 0),
+                       line_up=self._line_up)
 
     def _start_clicked(self) -> None:
         if self.item is not None:
-            self.start(self.item)
+            self.start(self.item, line_up=self._line_up)
 
     # --- the session's news ---------------------------------------------------------
 

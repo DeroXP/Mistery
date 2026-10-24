@@ -15,9 +15,12 @@ Play here goes out through play_requested with the FriendItem to play.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, replace
+from typing import Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -65,6 +68,9 @@ class FriendItem:
     heading: str | None = None  # a card's title when not its own: an episode's show, on Home
     backdrop: str | None = None         # our copy of their wide picture (a film's backdrop), once fetched
     backdrop_mark: str | None = None    # their mark for it (art.WIDE)
+    whose: str = ""             # the friend's name, on this library's own pages
+    away: bool = False          # their PC is not answering: drawn dimmed (app/share/reach.py)
+    added_at: float = 0.0       # when it came into the copy of their catalogue, for "Recently added"
 
     @property
     def display_title(self) -> str:
@@ -79,6 +85,11 @@ class FriendItem:
     @property
     def wide_art(self) -> str | None:
         return self.backdrop or self.art
+
+    @property
+    def ref_id(self) -> int:
+        """Its number in this library's playlists (see ref_id below)."""
+        return -(int(self.friend_id) * REF_SPAN + int(self.remote_id))
 
 
 def _subtitle(row, episodes: int = 0) -> str:
@@ -217,6 +228,279 @@ def friend_items(friend_id: int, kind: str, parent_id: int | None = None) -> lis
     return items
 
 
+def title_key(title: str | None) -> str:
+    """A title as compared across libraries: case, accents, spacing and
+    punctuation dropped, so "Spider-Man - Homecoming" and "Spider-Man: Homecoming"
+    are one film, and a leading "The" as well ("The Avengers" and "Avengers")."""
+    text = unicodedata.normalize("NFKD", title or "").casefold()
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"^(the|a|an)\s+", "", text.strip())
+    return re.sub(r"[\W_]+", "", text) or text
+
+
+def same_title(first: tuple[str, int | None], second: tuple[str, int | None]) -> bool:
+    """(title key, year) pairs: the same film or show. A year either side may be
+    missing or one out (a festival year against the release year)."""
+    if first[0] != second[0] or not first[0]:
+        return False
+    return not first[1] or not second[1] or abs(int(first[1]) - int(second[1])) <= 1
+
+
+def library_items(kind: str) -> list[FriendItem]:
+    """Every friend's films ("movie"), shows ("show") or albums ("album"), for
+    this library's own pages, as if they were yours.
+
+    Once per title, whoever has it: the copy of a friend whose PC is answering
+    wins over one whose PC is not, and otherwise the first friend in name
+    order. Each says whose it is ("from austi" on its card) and is `away`
+    (drawn dimmed) when the friend it is from is not answering. Films and shows
+    you have yourself are taken out by the page (without_own), since a page
+    knows its own titles.
+    """
+    from ..music.library import album_key
+    from ..share import reach
+
+    chosen: dict[str, list[FriendItem]] = {}
+    for friend in db.friends(include_paused=False):
+        friend_id = int(friend["id"])
+        away = not reach.here(friend)
+        added = {int(row["remote_id"]): float(row["updated_at"] or 0) for row in db.query(
+            "SELECT remote_id, updated_at FROM friend_media WHERE friend_id = ? AND kind = ?",
+            (friend_id, kind))}
+        for item in friend_items(friend_id, kind):
+            item.whose, item.away = str(friend["name"]), away
+            item.added_at = added.get(item.remote_id, 0.0)
+            item.subtitle = " · ".join(bit for bit in (item.subtitle, f"from {item.whose}") if bit)
+            if kind == "album":
+                key = album_key(item.artist or "", item.title)
+            else:
+                key = title_key(item.title)
+            group = chosen.setdefault(key, [])
+            match = next((n for n, other in enumerate(group)
+                          if kind == "album" or same_title((key, item.year), (key, other.year))), None)
+            if match is None:
+                group.append(item)
+            elif group[match].away and not item.away:
+                group[match] = item             # one that will play beats one that will not
+    return [item for group in chosen.values() for item in group]
+
+
+def without_own(friends: list[FriendItem], own: list[tuple[str, int | None]]) -> list[FriendItem]:
+    """Friends' films or shows less the ones you have yourself: `own` is your
+    titles as (title, year). Yours plays from your own disk, so yours is the
+    card."""
+    mine: dict[str, list[int | None]] = {}
+    for title, year in own:
+        mine.setdefault(title_key(title), []).append(year)
+    out = []
+    for item in friends:
+        key = title_key(item.title)
+        if not any(same_title((key, item.year), (key, year)) for year in mine.get(key, ())):
+            out.append(item)
+    return out
+
+
+# --- a friend's songs, and their things in your playlists ---------------------
+#
+# A friend's song, film or episode has one number in this library: negative,
+# from whose it is and its number on their PC. The music player has always
+# queued their songs under it (MainWindow._play_friend_music); playlists keep
+# theirs under it too, in the same item_id column as yours (positive), so a
+# playlist can hold both without a second kind of entry.
+
+REF_SPAN = 1_000_000_000
+
+
+def ref_id(friend_id: int, remote_id: int) -> int:
+    """The number this library knows a friend's thing by."""
+    return -(int(friend_id) * REF_SPAN + int(remote_id))
+
+
+def from_ref(ref: int) -> tuple[int, int] | None:
+    """(friend id, their id) from a friend's thing's number; None for one of yours."""
+    ref = int(ref)
+    if ref >= 0:
+        return None
+    friend_id, remote_id = divmod(-ref, REF_SPAN)
+    return (friend_id, remote_id) if friend_id > 0 and remote_id > 0 else None
+
+
+def _whose(friend_id: int) -> tuple[str, bool]:
+    """(their name, whether their PC is away) for a friend, or ("", True)."""
+    from ..share import reach
+
+    friend = db.friend(friend_id)
+    if friend is None or not friend["sharing"]:
+        return "", True
+    return str(friend["name"]), not reach.here(friend)
+
+
+def song_row(friend_id: int, song, album=None, whose: str = "", away: bool = False) -> dict:
+    """A friend's song as a row of a song list: the shape library.tracks()
+    gives yours, with "friend" and "remote_id" so the player fetches it from
+    their PC (player._with_address), and "away" (greyed, not playable) while
+    their PC does not answer. `song` is a FriendItem or a friend_media row."""
+    from ..share import art
+
+    get = (lambda name: getattr(song, name)) if isinstance(song, FriendItem) else (lambda name: song[name])
+    remote_id = int(get("remote_id"))
+    album_title = album["title"] if album is not None else ""
+    album_artist = album["artist"] if album is not None else ""
+    cover = art.cached(friend_id, "album", int(album["remote_id"]), album["art_mark"]) if album is not None else None
+    return {
+        "id": ref_id(friend_id, remote_id), "friend": friend_id, "remote_id": remote_id,
+        "path": None, "title": get("title") or "Untitled",
+        "artist": get("artist") or album_artist, "album_artist": album_artist,
+        "album": album_title,
+        # The album column says whose it is: a friend's song reads as one of
+        # yours everywhere else on the row.
+        "album_title": " · ".join(bit for bit in (album_title, f"from {whose}" if whose else "") if bit),
+        "album_artist_name": album_artist, "album_id": None,
+        "duration": get("duration") or 0.0, "cover": cover, "palette": None,
+        "disc_no": get("season"), "track_no": get("episode"), "year": album["year"] if album is not None else None,
+        "state": "away" if away else "ready", "liked": 0, "whose": whose,
+    }
+
+
+def album_song_rows(albums: list[FriendItem]) -> list[dict]:
+    """Every song of these friend's albums, album by album, as song rows."""
+    rows = []
+    for album in albums:
+        record = db.friend_media_one(album.friend_id, "album", album.remote_id)
+        if record is None:
+            continue
+        songs = db.friend_media(album.friend_id, "track", parent_id=album.remote_id)
+        songs = sorted(songs, key=lambda s: (s["season"] or 0, s["episode"] or 0, (s["title"] or "").lower()))
+        rows.extend(song_row(album.friend_id, song, record, album.whose, album.away) for song in songs)
+    return rows
+
+
+def friends_albums_not_mine() -> list[FriendItem]:
+    """Friends' albums you do not have yourself, once each (library_items)."""
+    from ..music import library
+
+    mine = {library.album_key(row["artist"] or "", row["title"] or "") for row in library.albums()}
+    return [item for item in library_items("album")
+            if library.album_key(item.artist or "", item.title) not in mine]
+
+
+def song_by_ref(ref: int) -> dict | None:
+    """A friend's song in one of your playlists, as a song row, or None when
+    their catalogue no longer has it (or they are no longer a friend)."""
+    found = from_ref(ref)
+    if found is None:
+        return None
+    friend_id, remote_id = found
+    song = db.friend_media_one(friend_id, "track", remote_id)
+    if song is None:
+        return None
+    whose, away = _whose(friend_id)
+    if not whose:
+        return None
+    album = db.friend_media_one(friend_id, "album", song["parent_id"]) if song["parent_id"] else None
+    return song_row(friend_id, song, album, whose, away)
+
+
+def video_by_ref(ref: int) -> FriendItem | None:
+    """A friend's film or episode in one of your playlists, or None."""
+    found = from_ref(ref)
+    if found is None:
+        return None
+    friend_id, remote_id = found
+    whose, away = _whose(friend_id)
+    if not whose:
+        return None
+    item = friend_item(friend_id, "movie", remote_id) or friend_item(friend_id, "episode", remote_id)
+    if item is None:
+        return None
+    item.whose, item.away = whose, away
+    if item.kind == "episode" and item.parent_id:
+        from ..share import art
+
+        show = db.friend_media_one(friend_id, "show", item.parent_id)
+        if show is not None:
+            item.heading = show["title"]
+            if item.art is None:
+                item.art = art.cached(friend_id, "show", int(show["remote_id"]), show["art_mark"])
+    item.subtitle = " · ".join(bit for bit in (item.subtitle, f"from {whose}") if bit)
+    return item
+
+
+def liked_song_rows(friend_id: int) -> list[dict]:
+    """A friend's Liked Songs, as their PC last said (catalog "liked")."""
+    whose, away = _whose(friend_id)
+    if not whose:
+        return []
+    albums = {int(row["remote_id"]): row for row in db.friend_media(friend_id, "album")}
+    songs = db.query("SELECT * FROM friend_media WHERE friend_id = ? AND kind = 'track' AND liked = 1 "
+                     "ORDER BY sort_title, title", (friend_id,))
+    return [song_row(friend_id, song, albums.get(song["parent_id"]), whose, away) for song in songs]
+
+
+def friends_with_liked() -> list[tuple[int, str]]:
+    """(friend id, name) of friends sharing with you who have liked songs."""
+    return [(int(row["id"]), str(row["name"])) for row in db.query(
+        "SELECT f.id, f.name FROM friends f WHERE f.sharing = 1 AND EXISTS (SELECT 1 FROM friend_media m "
+        "WHERE m.friend_id = f.id AND m.kind = 'track' AND m.liked = 1) ORDER BY f.name COLLATE NOCASE")]
+
+
+class PictureFetchers:
+    """Friends' pictures for their cards on this library's own pages.
+
+    Their pictures were only ever fetched by their own library page, as its
+    tabs came on screen; a film of theirs on your Movies page would otherwise
+    stay a blank poster until you had opened their library once. One fetcher
+    per friend (share/art.py Fetcher), nothing asked of a PC that is away, and
+    `arrived(friend id, kind, their id, path)` called from its thread.
+    """
+
+    def __init__(self, arrived: Callable[[int, str, int, str], None]) -> None:
+        self._arrived = arrived
+        self._fetchers: dict[int, object] = {}
+
+    def want(self, items: list) -> None:
+        from ..share import art
+
+        for item in items:
+            if getattr(item, "friend_id", None) is None or item.art or not item.art_mark or item.away:
+                continue
+            fetcher = self._fetchers.get(item.friend_id)
+            if fetcher is None or fetcher._stopped.is_set():
+                fetcher = art.Fetcher(item.friend_id, lambda kind, remote_id, path, who=item.friend_id:
+                                      self._arrived(who, kind, remote_id, path))
+                self._fetchers[item.friend_id] = fetcher
+            fetcher.want(item.kind, item.remote_id, item.art_mark)
+
+    def stop(self) -> None:
+        for fetcher in self._fetchers.values():
+            fetcher.stop()
+        self._fetchers.clear()
+
+
+def picture_arrived(cards: list, friend_id: int, kind: str, remote_id: int, path: str) -> None:
+    """A friend's picture came: the cards of that thing show it."""
+    for card in cards:
+        item = getattr(card, "_item", None)
+        if getattr(item, "friend_id", None) == friend_id and item.kind == kind \
+                and item.remote_id == remote_id:
+            item.art = path
+            card.set_item(item)
+
+
+class _Dimmed:
+    """A friend's card on one of this library's pages whose PC is not answering:
+    painted over, so it reads as there but not playable now."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().paintEvent(event)
+        if getattr(self._item, "away", False):
+            from PySide6.QtGui import QColor, QPainter
+
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(11, 10, 9, 160))
+            painter.end()
+
+
 class _FriendMenu:
     """What a right-click offers on something of a friend's."""
 
@@ -231,20 +515,39 @@ class _FriendMenu:
                            lambda: self.action_requested.emit("play", item))
         if item.kind in ("movie", "episode"):
             menu.addAction("Watch together", lambda: self.action_requested.emit("together", item))
+            # Into one of your playlists, beside your own films (ref_id).
+            menu.addAction("Add to playlist…", lambda: self.action_requested.emit("playlist", item))
         opens = {"movie": "Show details", "show": "Open show", "album": "Open album"}
         if self.offers_show:
             opens["episode"] = "Open show"
         if item.kind in opens:
             menu.addAction(opens[item.kind], lambda: self.action_requested.emit("details", item))
+        # A page's own entries (a playlist's Move up, Move down, Remove), as on
+        # your own cards (widgets/cards.set_extra_actions).
+        extra = getattr(self, "extra_actions", None) or []
+        if extra:
+            menu.addSeparator()
+            for label, action in extra:
+                menu.addAction(label, lambda a=action: self.action_requested.emit(a, item))
         menu.exec(event.globalPos())
 
 
-class FriendCard(_FriendMenu, PosterCard):
+class FriendCard(_FriendMenu, _Dimmed, PosterCard):
     """A friend's film or show."""
 
+    def __init__(self, item, parent=None) -> None:
+        super().__init__(item, parent)
+        if item.away and item.whose:
+            self.setToolTip(f"{item.whose}'s PC isn't answering right now, so this can't play yet.")
 
-class FriendAlbumCard(_FriendMenu, AlbumCard):
+
+class FriendAlbumCard(_FriendMenu, _Dimmed, AlbumCard):
     """A friend's album: square, like yours."""
+
+    def __init__(self, item, parent=None) -> None:
+        super().__init__(item, parent)
+        if item.away and item.whose:
+            self.setToolTip(f"{item.whose}'s PC isn't answering right now, so this can't play yet.")
 
 
 class FriendEpisodeCard(_FriendMenu, WideCard):
@@ -351,6 +654,7 @@ class FriendLibraryView(QWidget):
     back_requested = Signal()
     play_requested = Signal(object)         # a FriendItem: a film, an episode, an album or a song
     together_requested = Signal(object)     # a FriendItem: a movie night of a film or episode, on their PC
+    playlist_requested = Signal(object)     # a FriendItem: Add to playlist, into one of yours
     # From threads, back on Qt's thread.
     _art_arrived = Signal(str, int, str)
     _refreshed = Signal(int, object)
@@ -796,6 +1100,8 @@ class FriendLibraryView(QWidget):
             self.play_requested.emit(item)
         elif action == "together":
             self.together_requested.emit(item)
+        elif action == "playlist":
+            self.playlist_requested.emit(item)
         elif item.kind != "episode":
             self._open(item)
 

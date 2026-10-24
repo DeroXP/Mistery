@@ -712,10 +712,19 @@ def playlist_tracks(playlist_id: int) -> list[dict]:
     entries = db.playlist_entries(playlist_id)
     if not entries:
         return []
-    found = tracks_by_id(int(row["item_id"]) for row in entries)
+    found = tracks_by_id(int(row["item_id"]) for row in entries if int(row["item_id"]) > 0)
     rows = []
     for entry in entries:
-        track = found.get(int(entry["item_id"]))
+        number = int(entry["item_id"])
+        if number < 0:
+            # A friend's song (app/ui/friend_library_view.ref_id): from their
+            # catalogue, greyed while their PC does not answer, and skipped while
+            # they are not a friend, as a song of yours whose file has gone is.
+            from ..ui.friend_library_view import song_by_ref
+
+            track = song_by_ref(number)
+        else:
+            track = found.get(number)
         if track is not None:
             rows.append({**dict(track), "entry_id": int(entry["id"])})
     return rows
