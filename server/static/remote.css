@@ -14,6 +14,11 @@
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+/* `hidden` has to win over the display the panels below are given. Without
+   this the film panel (.screen, black, over everything) and the menu's dark
+   backdrop (.sheet) showed at all times, and the page was a black screen
+   (1.9.0 on the owner's phone, 2026-10-25). */
+[hidden] { display: none !important; }
 html, body { margin: 0; background: var(--bg); color: var(--text); height: 100%; }
 body {
   font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
