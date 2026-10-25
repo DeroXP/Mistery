@@ -367,6 +367,9 @@ def run_background(*, poll: float = PORT_POLL, until: float | None = None,
                     mine.start()
                 elif mine.running and not Sharer.wanted():
                     mine.stop()             # the owner switched sharing off
+            # The phone remote (app/remote) keeps the owner's phone in reach while
+            # Mistery is closed, and gives way to Mistery the same way.
+            _remote_follow(not app)
             if stop is None:
                 time.sleep(poll)
             elif stop(poll):
@@ -376,4 +379,23 @@ def run_background(*, poll: float = PORT_POLL, until: float | None = None,
         pass
     finally:
         mine.stop()
+        _remote_follow(False)
     return 0
+
+
+def _remote_follow(ours: bool) -> None:
+    """Run the phone remote's connection here while this is the Mistery that
+    should (`ours`: the app is closed) and the owner has it switched on."""
+    from ..config import settings
+    from ..remote import relay as remote_relay
+
+    if ours:
+        try:
+            settings.load()                 # the app may have switched it on or off since
+        except Exception:                   # noqa: BLE001 - the last settings will do
+            pass
+    if ours and settings.get("remote_enabled"):
+        if remote_relay.current() is None:
+            remote_relay.start()
+    elif remote_relay.current() is not None:
+        remote_relay.stop()

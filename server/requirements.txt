@@ -14,6 +14,9 @@
 fastapi==0.120.4
 uvicorn==0.41.0
 httpx==0.28.1
+# The phone remote's PC connection is a WebSocket (relay.py); uvicorn needs a
+# library to speak it.
+websockets==15.0.1
 
 # --- pulled in by those three; pinned so the build is reproducible ----------
 annotated-doc==0.0.5

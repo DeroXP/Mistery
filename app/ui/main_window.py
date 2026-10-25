@@ -232,6 +232,20 @@ class MainWindow(QMainWindow):
         # Friends listening to this library's music (share/presence.py), and
         # telling friends which of theirs plays here.
         QTimer.singleShot(3000, self, self._start_presence)
+        # The phone remote (app/remote): this window answers its commands, and
+        # its connection to the website opens when it is switched on.
+        from ..remote import bridge as remote_bridge
+
+        remote_bridge.install(self)
+        QTimer.singleShot(3500, self, self._start_remote)
+
+    @staticmethod
+    def _start_remote() -> None:
+        if not settings.get("remote_enabled"):
+            return
+        from ..remote import relay as remote_relay
+
+        remote_relay.start()
 
     def _check_friends(self) -> None:
         """Ask friends' PCs whether they answer, and for what has changed in
@@ -1917,6 +1931,19 @@ class MainWindow(QMainWindow):
             from ..share import background
 
             background.start_now()
+        # The phone remote (app/remote): its connection goes with this window,
+        # and the Mistery without one carries it on (share/sharer.run_background).
+        from .. import remote as remote_package
+        from ..remote import bridge as remote_bridge
+
+        remote_bridge.uninstall()
+        remote_relay = getattr(remote_package, "relay", None)
+        if remote_relay is not None and remote_relay.current() is not None:
+            remote_relay.stop()
+            if sharing is None and settings.get("remote_enabled"):
+                from ..share import background
+
+                background.start_now()
         songs = getattr(share, "music", None)       # a friend's songs were played
         if songs is not None:
             songs.close_all()

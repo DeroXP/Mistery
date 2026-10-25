@@ -75,6 +75,7 @@ _log = logging.getLogger("party.phone")
 
 SEGMENT = 4.0
 QUALITY = "1080p"
+SONG_BITRATE = 256_000          # a song for the phone remote (app/remote), when it has to be made
 # Film time 0 is at this PTS in every segment: -output_ts_offset 10 s, plus the
 # 1.4 s the MPEG-TS muxer adds (twice its default 0.7 s max_delay). WebVTT
 # subtitles are pinned to it with X-TIMESTAMP-MAP.
@@ -335,16 +336,22 @@ class _Job:
 class _Film:
     """The room's film for phones: HLS made on demand, shared by every phone."""
 
-    def __init__(self, key: str, path: str, duration: float, work_dir: str | None = None) -> None:
+    def __init__(self, key: str, path: str, duration: float, work_dir: str | None = None,
+                 quality: str = QUALITY, audio_only: bool = False) -> None:
         self.key = key
         self.path = path
         self.duration = max(0.1, float(duration))
         self.id = secrets.token_hex(6)
         self.count = max(1, math.ceil(self.duration / SEGMENT - 1e-6))
         self.folder = Path(tempfile.mkdtemp(prefix="mistery-phone-", dir=work_dir))
+        # The phone remote (app/remote) streams through a website, so its films
+        # go smaller (720p), and a song a phone can't play as it is goes the
+        # same way as sound alone: AAC in segments, seekable like a film.
+        self.quality = quality if quality in transcode.QUALITIES else QUALITY
+        self.audio_only = bool(audio_only)
         self.source = transcode.describe(path)
         self.audio = _pick_audio(self.source)
-        self.subtitles = _text_subtitles(path, self.source)
+        self.subtitles = [] if self.audio_only else _text_subtitles(path, self.source)
         self._lock = threading.Lock()
         self._job: _Job | None = None
         self._newest = 0
@@ -360,8 +367,12 @@ class _Film:
         # No #EXT-X-START here, though HLS allows it: in a master playlist
         # ffmpeg's HLS reader took the master for a media playlist with no
         # segments (no length at all). The media playlist carries it.
-        bandwidth = int(transcode.QUALITIES[QUALITY][2] * 1.25 + transcode.AUDIO_BITRATE)
         lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-INDEPENDENT-SEGMENTS"]
+        if self.audio_only:
+            lines += [f'#EXT-X-STREAM-INF:BANDWIDTH={int(SONG_BITRATE * 1.15)},CODECS="mp4a.40.2"',
+                      "media.m3u8"]
+            return ("\n".join(lines) + "\n").encode("utf-8")
+        bandwidth = int(transcode.QUALITIES[self.quality][2] * 1.25 + transcode.AUDIO_BITRATE)
         group = ""
         if self.subtitles:
             group = ',SUBTITLES="subs"'
@@ -534,13 +545,15 @@ class _Film:
 
     def command(self, number: int, stop: int, sound_from: float | None = None,
                 sound_to: float | None = None) -> list[str] | None:
+        if self.audio_only:
+            return self._sound_command(number, stop, sound_from, sound_to)
         ffmpeg, encoder = find_ffmpeg(), transcode.pick_encoder()
         if not ffmpeg or not encoder:
             return None
         start, end = number * SEGMENT, stop * SEGMENT
         source = self.source
         hdr = source.hdr if source is not None and source.ok else None
-        _, _, rate = transcode.QUALITIES[QUALITY]
+        _, _, rate = transcode.QUALITIES[self.quality]
         args = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-hwaccel", "auto",
                 # The film's own timestamps from 0, whatever the run: see the module docstring.
                 "-copyts", "-start_at_zero"]
@@ -554,7 +567,7 @@ class _Film:
         args += ["-i", f"file:{self.path}", "-map", "0:V:0",
                  "-map", f"0:a:{self.audio}?" if self.audio is not None else "0:a:0?"]
         keys = ",".join(f"{k * SEGMENT:g}" for k in range(number, stop))
-        picture = transcode._video_filter(QUALITY, hdr)
+        picture = transcode._video_filter(self.quality, hdr)
         if sound_from is not None or sound_to is not None:
             # The input was opened wider than the picture: back to its own edges.
             edges = [f"start={start:.6f}"] + ([f"end={end:.6f}"] if stop < self.count else [])
@@ -574,6 +587,35 @@ class _Film:
                  # (-g keeps the encoder from adding any), never later.
                  "-f", "hls", "-hls_time", "1", "-hls_list_size", "3", "-hls_segment_type", "mpegts",
                  "-start_number", str(number), "-hls_flags", "temp_file",
+                 "-hls_segment_filename", str(self.folder / "%d.ts"), str(self.folder / f"run{number}.m3u8")]
+        return args
+
+    def _sound_command(self, number: int, stop: int, sound_from: float | None,
+                       sound_to: float | None) -> list[str] | None:
+        """A song's run: its sound as AAC, cut every SEGMENT seconds from where
+        the run starts (every frame of sound can start a segment, so -hls_time
+        alone puts the cuts on the same 4 s grid a film's keyframes make), with
+        the same timestamps and the same seam rule (_sound_edges) as a film's."""
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            return None
+        start, end = number * SEGMENT, stop * SEGMENT
+        begin = sound_from if sound_from is not None else start
+        finish = sound_to if sound_to is not None else end
+        args = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-copyts", "-start_at_zero"]
+        if begin > 0:
+            args += ["-ss", f"{max(0.0, begin - 0.3):.3f}"]
+        if stop < self.count:
+            args += ["-to", f"{finish + 0.3:.3f}"]
+        trim = [f"start={begin:.6f}"] + ([f"end={finish:.6f}"] if stop < self.count else [])
+        args += ["-i", f"file:{self.path}", "-vn", "-sn", "-dn",
+                 "-map", f"0:a:{self.audio}" if self.audio is not None else "0:a:0",
+                 "-af", f"atrim={':'.join(trim)}",
+                 "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", str(SONG_BITRATE),
+                 "-map_chapters", "-1", "-map_metadata", "-1",
+                 "-output_ts_offset", f"{TS_OFFSET:g}",
+                 "-f", "hls", "-hls_time", f"{SEGMENT:g}", "-hls_list_size", "3",
+                 "-hls_segment_type", "mpegts", "-start_number", str(number), "-hls_flags", "temp_file",
                  "-hls_segment_filename", str(self.folder / "%d.ts"), str(self.folder / f"run{number}.m3u8")]
         return args
 

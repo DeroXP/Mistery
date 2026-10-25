@@ -90,6 +90,10 @@ SHARING_MODULES = (
     "app.share.sharer", "app.share.background", "app.share.catalog", "app.share.art",
     "app.share.playback", "app.share.music", "app.share.nights", "app.party.media",
     "app.share.reach",          # since 1.8.0: which friends' PCs answer (imported inside functions)
+    # since 1.9.0, the phone remote: its connection to the website, and the
+    # WebSocket library it speaks with (imported inside a function).
+    "app.remote.relay", "app.remote.api", "app.remote.bridge", "app.remote.link",
+    "websockets.sync.client",
     "app.ui.friends_view", "app.ui.friend_library_view",
 )
 

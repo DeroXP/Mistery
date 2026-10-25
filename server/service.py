@@ -1,12 +1,15 @@
 """mistery.app - the landing page and the update feed.
 
-Five things live here and nothing else (each answers GET and HEAD):
+Five things live here, and the phone remote (each answers GET and HEAD):
 
     /                    the landing page
     /download            302 to the installer named in the signed manifest
     /api/update          that manifest, byte for byte as it was signed
     /api/health          one line for Railway's health check
     /static/...          one stylesheet, one icon, any screenshots
+    /remote/<id>, /r/<id>/..., /relay/pc
+                         the phone remote: a phone's requests passed to its
+                         owner's PC and back, kept nowhere (relay.py)
 
 It holds no database, no cookies, no sessions, no analytics and no secret. The
 only thing it knows that the public does not is nothing at all: the public key
@@ -50,6 +53,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import config as config_module
 import manifest as manifest_module
 import page
+import relay
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -261,6 +265,9 @@ app = FastAPI(
     openapi_url=None,
     lifespan=lifespan,
 )
+# The phone remote (relay.py): /remote/<id>, the phone's page; /r/<id>/..., its
+# requests passed to that PC; /relay/pc, the PC's own connection.
+app.include_router(relay.router)
 
 
 def client_address(request: Request) -> str:
@@ -517,6 +524,7 @@ async def api_health() -> JSONResponse:
             "trusted_key": state.config.key_id,
             "screenshots": len(state.shots),
             "uptime_seconds": int(time.time() - state.started_at),
+            **relay.health(),
         },
         headers={"Cache-Control": "no-store"},
     )

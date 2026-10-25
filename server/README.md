@@ -12,6 +12,7 @@ things:
 | `/update/manifest.json` | the same bytes at the older URL, for updaters already in the field. It shares `/api/update`'s rate limit, because it is the same answer |
 | `/api/health` | one JSON line: Railway watches it, and so should you after a deploy. It reads what is cached and never waits on GitHub |
 | `/static/…` | one stylesheet, one icon, and any screenshots you drop in |
+| `/remote/<id>`, `/r/<id>/…`, `/relay/pc` | the phone remote: a phone's page, and its requests passed to its owner's PC and back (see *The phone remote* below) |
 
 **It holds no secret and it cannot sign an update.** The private key lives on
 the release machine and in a GitHub Actions secret; this service knows only the
@@ -141,6 +142,44 @@ the one thing this service and the release workflow have to agree on, and
 To roll a release back, delete or replace that asset on GitHub — the server
 follows a manifest backwards as willingly as forwards, because a release pulled
 for being broken has to be able to go away.
+
+## The phone remote
+
+Mistery can put its owner's library on their phone from anywhere: their PC keeps
+one WebSocket open to `/relay/pc`, the phone opens `/remote/<id>`, and every
+request the phone makes to `/r/<id>/…` is handed to that PC and answered
+through the same connection (`relay.py`, the page in `remote_page.py` and
+`static/remote.js`).
+
+What it still does not hold:
+
+- **The phone's key.** The link the PC shows is `/remote/<id>#<key>`. What follows
+  `#` never leaves the phone; the page signs each request with it and the PC
+  checks the signature. This service cannot make one, so it cannot ask anybody's
+  PC for anything.
+- **What passes through.** Songs, films and pictures do go through this service,
+  a 64 KB piece at a time in memory, on their way to the phone, and nothing is
+  kept. That was the owner's choice: it works on any network with nothing to set
+  up, at the price of this service's bandwidth. The PC sends phone-sized copies
+  (AAC music, 720p film) to keep it small.
+- **A cookie, an account or a log of who asked.** The PC's id is a hash of a
+  secret the PC keeps; that, and a count of the bytes it has passed today, is all
+  that exists, and only while it is connected.
+
+**Bandwidth costs money on Railway.** Each byte comes in from the PC and goes
+out to the phone: an album is about 100 MB of egress, a two-hour film at 720p
+about 3 GB. `MISTERY_RELAY_DAILY_GB` stops one PC at its limit for the rest of
+the UTC day, and `MISTERY_RELAY_MAX_PCS` caps how many PCs may be connected at
+once (anybody can run Mistery, so anybody could connect one).
+
+**Keep one replica.** A PC's connection and its phone's requests have to reach
+the same process. Railway runs one by default; scaling the service out would
+send a phone to a process that has never heard of its PC.
+
+| Name | Default | What it is for |
+|---|---|---|
+| `MISTERY_RELAY_DAILY_GB` | `40` | Gigabytes one PC may pass through in a UTC day. |
+| `MISTERY_RELAY_MAX_PCS` | `50` | PCs connected at once. |
 
 ## Screenshots
 

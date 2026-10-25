@@ -10,3 +10,6 @@ numpy>=1.26
 # certificate made fresh for each session and pinned in the invite code.
 # The standard library can speak TLS but cannot make a certificate.
 cryptography>=42
+# The phone remote (app/remote/relay.py) keeps one WebSocket open to Mistery's
+# website; its requests come and go over it.
+websockets>=13

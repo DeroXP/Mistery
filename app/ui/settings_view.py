@@ -130,6 +130,7 @@ class SettingsView(QWidget):
     _art_exported = Signal(str, int, int, str)
     _update_checked = Signal(object)        # what MisteryUpdate.exe --check-now found
     _update_switched = Signal(bool)         # whether the on/off switch was written
+    _remote_status_heard = Signal(str)      # the phone remote's connection, from its thread (app/remote/relay.py)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -180,6 +181,7 @@ class SettingsView(QWidget):
         thumbnails = self._build_thumbnails()
         discord = self._build_discord()
         self._movie_night = self._build_movie_night()
+        remote_card = self._build_remote()
         vr_card = self._build_vr()
         controller = self._build_controller()
         about = self._build_about()
@@ -187,7 +189,8 @@ class SettingsView(QWidget):
             ("Library", folders), ("Artwork", tmdb), ("Display", display_card),
             ("Playback", playback), ("Music", music),
             ("Sound", sound), ("Thumbnails", thumbnails), ("Discord", discord),
-            ("Movie night", self._movie_night), ("VR", vr_card), ("Controller", controller),
+            ("Movie night", self._movie_night), ("Phone remote", remote_card),
+            ("VR", vr_card), ("Controller", controller),
             ("System", about),
         ]
         for index, (name, card) in enumerate(self._sections):
@@ -1260,6 +1263,143 @@ class SettingsView(QWidget):
         self._scroll.verticalScrollBar().setValue(max(0, self._movie_night.y() - 20))
 
     # --- vr -----------------------------------------------------------------
+
+    def _build_remote(self) -> QWidget:
+        """The phone remote (app/remote): this library on your phone, anywhere,
+        through Mistery's website."""
+        from .party_dialog import _QrCode
+
+        card, layout = _section(
+            "Phone remote",
+            "Play your library on your phone from anywhere, or use your phone as a remote for "
+            "what this PC is playing. Your phone opens a page on Mistery's website, and this PC "
+            "answers it through the website: songs and films pass through the website on their "
+            "way to your phone, and it keeps none of them. Mistery has to be running here "
+            "(with the window closed is fine).",
+        )
+        self._remote_on = QCheckBox("Let my phone reach this library through Mistery's website")
+        self._remote_on.setChecked(bool(settings.get("remote_enabled")))
+        self._remote_on.toggled.connect(self._on_remote_toggled)
+        layout.addWidget(self._remote_on)
+
+        self._remote_status = QLabel()
+        self._remote_status.setObjectName("Faint")
+        self._remote_status.setWordWrap(True)
+        layout.addWidget(self._remote_status)
+
+        buttons = QHBoxLayout()
+        self._remote_link_button = QPushButton("Link a phone")
+        self._remote_link_button.setObjectName("Primary")
+        self._remote_link_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._remote_link_button.clicked.connect(self._show_remote_link)
+        buttons.addWidget(self._remote_link_button)
+        self._remote_copy = QPushButton("Copy link")
+        self._remote_copy.setObjectName("Ghost")
+        self._remote_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._remote_copy.clicked.connect(self._copy_remote_link)
+        buttons.addWidget(self._remote_copy)
+        self._remote_forget = QPushButton("Forget my phones")
+        self._remote_forget.setObjectName("Ghost")
+        self._remote_forget.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._remote_forget.setToolTip("A new link: every phone linked so far stops working")
+        self._remote_forget.clicked.connect(self._forget_remote_phones)
+        buttons.addWidget(self._remote_forget)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self._remote_qr = _QrCode(module=5)
+        self._remote_qr.setVisible(False)
+        layout.addWidget(self._remote_qr, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._remote_qr_note = QLabel(
+            "Scan this with your phone's camera, or open the copied link on it. Keep the link to "
+            "yourself: whoever has it can play your library.")
+        self._remote_qr_note.setObjectName("Faint")
+        self._remote_qr_note.setWordWrap(True)
+        self._remote_qr_note.setVisible(False)
+        layout.addWidget(self._remote_qr_note)
+
+        self._remote_status_heard.connect(self._show_remote_state)
+        from ..remote import relay as remote_relay
+
+        remote_relay.listeners.append(self._remote_status_heard.emit)
+        self._show_remote_state()
+        return card
+
+    def _remote_state_words(self) -> str:
+        from ..remote import link, relay as remote_relay
+
+        if not settings.get("remote_enabled"):
+            return "Off. Nothing on this PC can be reached from a phone."
+        current = remote_relay.current()
+        status = current.status if current is not None else "starting"
+        site = link.site().split("//", 1)[-1]
+        return {
+            "connected": f"On, and connected to {site}. Your linked phone can reach this PC.",
+            "away": (current.detail if current is not None and current.detail else
+                     f"On, but {site} can't be reached right now. Trying again by itself."),
+            "full": current.detail if current is not None else "",
+            "starting": f"On. Connecting to {site}…",
+        }.get(status, f"On. Connecting to {site}…")
+
+    def _show_remote_state(self, _status: str = "") -> None:
+        enabled = bool(settings.get("remote_enabled"))
+        self._remote_status.setText(self._remote_state_words())
+        for button in (self._remote_link_button, self._remote_copy, self._remote_forget):
+            button.setEnabled(enabled)
+        if not enabled:
+            self._remote_qr.setVisible(False)
+            self._remote_qr_note.setVisible(False)
+
+    def _on_remote_toggled(self, on: bool) -> None:
+        from ..remote import relay as remote_relay
+
+        settings.set("remote_enabled", bool(on))
+        if on:
+            remote_relay.start()
+        else:
+            remote_relay.stop()
+        # The Mistery without a window keeps the phone in reach while this one
+        # is closed: it starts at sign-in when anything wants it.
+        from ..share import background
+
+        background.sync()
+        self._show_remote_state()
+
+    def _show_remote_link(self) -> None:
+        from ..remote import link
+
+        self._remote_qr.set_text(link.phone_link())
+        self._remote_qr.setVisible(True)
+        self._remote_qr_note.setVisible(True)
+
+    def _copy_remote_link(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        from ..remote import link
+
+        QApplication.clipboard().setText(link.phone_link())
+        self._remote_status.setText("Link copied. Open it on your phone. " + self._remote_state_words())
+
+    def _forget_remote_phones(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from ..remote import api, link
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Forget my phones")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText("Make a new link?")
+        box.setInformativeText("Every phone linked so far stops working, and has to be linked again "
+                               "with the new link.")
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        link.forget_phones()
+        api.forget()
+        if self._remote_qr.isVisible():
+            self._remote_qr.set_text(link.phone_link())
+        self._remote_status.setText("New link made: phones linked before can't reach this PC any more.")
 
     def _build_controller(self) -> QWidget:
         card, layout = _section(

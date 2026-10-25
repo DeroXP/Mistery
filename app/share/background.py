@@ -88,9 +88,11 @@ def command() -> list[str]:
 
 
 def wanted() -> bool:
-    """Whether friends should be served while Mistery is closed."""
-    return (bool(settings.get("sharing_background", True))
-            and bool(settings.get("sharing_enabled")) and bool(db.friends()))
+    """Whether friends, or the owner's phone (the phone remote, app/remote),
+    should be served while Mistery is closed."""
+    if not settings.get("sharing_background", True):
+        return False
+    return (bool(settings.get("sharing_enabled")) and bool(db.friends())) or bool(settings.get("remote_enabled"))
 
 
 def _sandboxed() -> bool:

@@ -407,6 +407,14 @@ DEFAULTS: dict = {
     # in (a listening party with you as the DJ: app/share/presence.py).
     "share_presence": True,
     "party_quality": "auto",        # auto | original | 1080p | 720p
+    # The phone remote (app/remote): this PC reachable from its owner's phone
+    # through the website. Off until switched on in Settings. The secret proves
+    # this PC to the website (its id is a hash of it); the key is the phone's,
+    # in the link Settings shows, and signs everything the phone asks.
+    "remote_enabled": False,
+    "remote_secret": "",
+    "remote_key": "",
+    "remote_site": "https://mistery.up.railway.app",
     # No auto_update key here on purpose. Updates are MisteryUpdate.exe's job
     # and the switch lives in updater.json in the install folder, because the
     # updater runs on PCs where Mistery has never been opened and this file does

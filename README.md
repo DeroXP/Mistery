@@ -551,6 +551,36 @@ into a path, and they never see where your files are. Each thing they play gets
 its own token, which is handed back when they stop. **Pause** stops serving a
 friend for now. **Remove** forgets them, their library and your place in it.
 
+## Phone remote
+
+Your library on your phone, from anywhere: play any album, song, film or
+episode on the phone itself, or use the phone as a remote for what this PC is
+playing (play, pause, skip, seek, volume, and "play this on my PC").
+
+**Switching it on.** **Settings → Phone remote → Let my phone reach this library
+through Mistery's website**, then **Link a phone**: scan the QR code with the
+phone's camera, or **Copy link** and open it on the phone. Add the page to the
+phone's home screen to keep it. Mistery has to be running on the PC; with the
+window closed it still answers (the same windowless Mistery that serves friends),
+but playing things *on the PC* needs the window.
+
+**How it travels.** This PC keeps one connection open to Mistery's website
+(nothing to forward on the router, any network). The phone's page asks the
+website, and the website hands each request to this PC and the answer back,
+keeping nothing. Songs and films do pass through the website on their way, so
+they go phone-sized: a song in MP3 or AAC as it is, anything else as 256 kbit/s
+AAC, a film as 720p H.264. Where the phone got to in a film becomes your place in
+it here.
+
+**The key.** The link is `…/remote/<this PC>#<key>`. What follows `#` never leaves
+the phone: its page signs every request with it, and this PC answers nothing
+unsigned, wrongly signed, copied and sent again, or from a clock more than two
+minutes out. The website never has the key, so it cannot ask this PC for
+anything. Whoever has the link can play your library, so keep it to yourself;
+**Forget my phones** makes a new one and every phone linked before stops working.
+
+Friends' films and songs are not on the phone page: they are on their PCs.
+
 ## Listening parties
 
 Listen to music together, each on your own PC, in step: what the DJ plays,
