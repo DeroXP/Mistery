@@ -12,7 +12,25 @@ can say script-src 'self' and nothing else may run here.
 
 from __future__ import annotations
 
+import hashlib
 import html
+from pathlib import Path
+
+_STATIC = Path(__file__).resolve().parent / "static"
+
+
+def _version(name: str) -> str:
+    """A short hash of a static file, put on its address (?v=…). The site keeps
+    /static for a day in every browser (service.py), so without it a phone held
+    on to a broken remote.css for a day after the fix was live (2026-10-25)."""
+    try:
+        return hashlib.sha256((_STATIC / name).read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "0"
+
+
+_CSS = f"/static/remote.css?v={_version('remote.css')}"
+_JS = f"/static/remote.js?v={_version('remote.js')}"
 
 CSP = (
     "default-src 'none'; "
@@ -26,7 +44,7 @@ CSP = (
     "frame-ancestors 'none'"
 )
 
-_HEAD = """<!doctype html>
+_HEAD = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -39,7 +57,7 @@ _HEAD = """<!doctype html>
 <title>Mistery remote</title>
 <link rel="icon" href="/static/icon.png">
 <link rel="apple-touch-icon" href="/static/icon.png">
-<link rel="stylesheet" href="/static/remote.css">
+<link rel="stylesheet" href="{_CSS}">
 </head>
 """
 
@@ -67,7 +85,7 @@ def render(rid: str) -> str:
 <div id="sheet" class="sheet" hidden></div>
 <div id="screen" class="screen" hidden></div>
 <audio id="audio" preload="auto"></audio>
-<script src="/static/remote.js" defer></script>
+<script src="{_JS}" defer></script>
 </body>
 </html>
 """
